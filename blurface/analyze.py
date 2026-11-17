@@ -21,6 +21,7 @@ from .video import iter_frames, probe
 ANALYSIS_SIDE = 1920  # 4K는 FHD로 줄여서 분석
 EMBED_PER_SEC = 5  # 초당 얼굴 특징값 추출 횟수
 MIN_EMBED_FACE = 24  # 이보다 작은 얼굴(분석 해상도 px)은 특징값이 부정확해 건너뜀
+EDGE_EVERY = 2  # 가장자리 얼굴 검출 간격(프레임). 사이는 추적이 이어 줌
 
 
 def fill_and_smooth(obs: dict[int, tuple], max_gap: int, extend: int, lo: int, hi: int, window: int = 5):
@@ -61,7 +62,7 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
     timings: dict[str, float] = {}
     t0 = time.perf_counter()
 
-    detector = SCRFD(str(MODELS / "buffalo_l/det_10g.onnx"), 640, score_thresh=0.3)
+    detector = SCRFD(str(MODELS / "buffalo_l/det_10g.onnx"), 640, score_thresh=0.3, edge_pad=0.2)
     embedder = ArcFace()
     embed_every = max(1, round(info.fps / EMBED_PER_SEC))
 
@@ -79,7 +80,7 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
         diffs_sigs.append(0.0 if prev_sig is None else differences([prev_sig, sig])[1])
         prev_sig = sig
 
-        d = detector.detect(img)
+        d = detector.detect(img, edge=i % EDGE_EVERY == 0)
         if i % embed_every == 0:
             for j, x in enumerate(d):
                 if x[4] >= 0.5 and x[2] - x[0] >= MIN_EMBED_FACE:
