@@ -1,0 +1,15 @@
+[project]
+name = "blurface"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "av>=19.0.2",
+    "numpy>=2.5.5",
+    "onnx>=1.23.2",
+    "onnxruntime>=1.32.0",
+    "opencv-python>=5.0.0.93",
+    "pyobjc-framework-quartz>=13.0",
+    "pyobjc-framework-vision>=13.0",
+    "scenedetect>=0.7.3",
+    "scipy>=1.18.1",
+]
