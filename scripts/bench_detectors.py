@@ -43,7 +43,7 @@ def sample_frames(path: Path, every_sec: float, max_side: int = 1920):
 
 def draw(img, dets, color, label):
     out = img.copy()
-    for x1, y1, x2, y2, s in dets:
+    for x1, y1, x2, y2, s in (d[:5] for d in dets):
         cv2.rectangle(out, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
         cv2.putText(out, f"{s:.2f}", (int(x1), int(y1) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
     cv2.putText(out, f"{label}: {len(dets)}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 4)

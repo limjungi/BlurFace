@@ -1,4 +1,4 @@
-"""얼굴 검출기. 모든 검출기는 BGR 이미지를 받아 (N, 5) 배열 [x1, y1, x2, y2, score]를 돌려준다."""
+"""얼굴 검출기. 모든 검출기는 BGR 이미지를 받아 (N, 5 이상) 배열 [x1, y1, x2, y2, score, (키포인트 10개)]를 돌려준다."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def nms(dets: np.ndarray, thresh: float) -> np.ndarray:
     """점수 순으로 겹치는 상자를 제거한다."""
     if len(dets) == 0:
         return dets
-    x1, y1, x2, y2, s = dets.T
+    x1, y1, x2, y2, s = dets[:, :5].T
     areas = (x2 - x1) * (y2 - y1)
     order = s.argsort()[::-1]
     keep = []

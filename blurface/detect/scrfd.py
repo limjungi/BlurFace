@@ -77,11 +77,14 @@ class SCRFD(Detector):
                 continue
             c = self._anchor_centers(stride)[keep]
             d = dist[keep]
+            kps = outs[i + 2 * n].reshape(-1, 10)[keep] * stride
+            kps = kps + np.tile(c, 5)  # 키포인트 5개(눈·코·입꼬리)는 앵커 중심 기준 오프셋
             b = np.stack([c[:, 0] - d[:, 0], c[:, 1] - d[:, 1],
                           c[:, 0] + d[:, 2], c[:, 1] + d[:, 3], scores[keep]], axis=1)
-            boxes.append(b)
+            boxes.append(np.hstack([b, kps]))
         if not boxes:
-            return np.zeros((0, 5), np.float32)
+            return np.zeros((0, 15), np.float32)
         dets = np.concatenate(boxes)
         dets[:, :4] /= scale
+        dets[:, 5:] /= scale
         return nms(dets, self.nms_thresh)
