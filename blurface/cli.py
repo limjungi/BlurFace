@@ -1,5 +1,6 @@
 """blurface 명령어.
 
+  blurface gui [영상.mp4]                     화면으로 열기
   blurface run 영상.mp4                       분석(처음 한 번) + 모자이크 영상 만들기
   blurface analyze 영상.mp4                   분석만 (인물 목록 이미지 생성)
   blurface persons 영상.mp4                   인물 목록과 현재 효과 보기
@@ -117,6 +118,8 @@ def main(argv=None):
         sp.add_argument("-o", "--output", help="출력 파일 (기본: 원본이름_mosaic.mp4)")
         sp.add_argument("--debug", action="store_true", help="상자와 인물 번호 표시")
 
+    sp = sub.add_parser("gui", help="화면으로 열기")
+    sp.add_argument("video", type=Path, nargs="?")
     sp = sub.add_parser("run", help="분석 + 영상 만들기")
     sp.add_argument("video", type=Path)
     sp.add_argument("--reanalyze", action="store_true", help="저장된 분석 무시하고 다시 분석")
@@ -130,6 +133,10 @@ def main(argv=None):
     effect_opts(sp)
 
     args = ap.parse_args(argv)
+    if args.cmd == "gui":
+        from .gui.app import main as gui_main
+
+        raise SystemExit(gui_main(["blurface"] + ([str(args.video)] if args.video else [])))
     if not args.video.exists():
         raise SystemExit(f"파일 없음: {args.video}")
 
