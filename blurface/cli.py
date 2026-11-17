@@ -8,6 +8,8 @@
 효과 지정 (run/render 공통)
   --effect blur:40                            모든 인물 기본 효과
   --person 2=sticker:smile --person 0=none    인물별 효과 (설정은 프로젝트에 저장됨)
+  --person-at 2@12-20=sticker:heart           인물 2만 12~20초 동안 다른 효과 (시각: 초, 1:05, 1:05.5)
+  --clear-at 2                                인물 2의 구간 효과 모두 지우기
   효과: mosaic[:블록수] blur[:강도] solid[:#색] sticker[:smile|heart] image:파일.png none
 """
 
@@ -40,17 +42,40 @@ def _load_or_analyze(video: Path, reanalyze: bool = False) -> Project:
     return p
 
 
+def parse_time(text: str) -> float:
+    parts = text.strip().split(":")
+    secs = 0.0
+    for part in parts:
+        secs = secs * 60 + float(part)
+    return secs
+
+
+def _person_id(p: Project, text: str) -> int:
+    pid = int(text.strip().lstrip("#P"))
+    if pid not in p.persons:
+        raise SystemExit(f"인물 #{pid} 없음 (blurface persons 로 목록 확인)")
+    return pid
+
+
 def _apply_effect_options(p: Project, args) -> bool:
     changed = False
+    for spec in getattr(args, "clear_at", None) or []:
+        p.persons[_person_id(p, spec)].segments = []
+        changed = True
     if getattr(args, "effect", None):
         p.default_effect = parse_effect(args.effect)
         changed = True
     for spec in getattr(args, "person", None) or []:
         pid_s, _, eff = spec.partition("=")
-        pid = int(pid_s.lstrip("#P"))
-        if pid not in p.persons:
-            raise SystemExit(f"인물 #{pid} 없음 (blurface persons 로 목록 확인)")
-        p.persons[pid].effect = parse_effect(eff)
+        p.persons[_person_id(p, pid_s)].effect = parse_effect(eff)
+        changed = True
+    for spec in getattr(args, "person_at", None) or []:
+        head, _, eff = spec.partition("=")
+        pid_s, _, span = head.partition("@")
+        a, _, b = span.partition("-")
+        if not a or not b:
+            raise SystemExit(f"구간 형식 오류: {spec} (예: 2@12-20=sticker:heart)")
+        p.add_segment(_person_id(p, pid_s), p.frame_at(parse_time(a)), p.frame_at(parse_time(b)), parse_effect(eff))
         changed = True
     if changed:
         p.save()
@@ -64,6 +89,8 @@ def _print_persons(p: Project):
         mark = "" if person.effect else " (기본)"
         warn = "  ⚠ 확인 필요" if p.needs_review(pid) else ""
         print(f"  #{pid:<3} {secs:6.1f}초  트랙 {len(person.tracks):<3} {effect_label(p.effect_for(pid))}{mark}{warn}")
+        for seg in person.segments:
+            print(f"        {p.time_of(seg['start']):6.2f}~{p.time_of(seg['end']):6.2f}초  {effect_label(seg['effect'])}")
     print(f"얼굴 목록 이미지: {p.dir / 'persons.jpg'}")
 
 
@@ -85,6 +112,8 @@ def main(argv=None):
     def effect_opts(sp):
         sp.add_argument("--effect", help="모든 인물 기본 효과")
         sp.add_argument("--person", action="append", metavar="번호=효과", help="인물별 효과 (여러 번 사용 가능)")
+        sp.add_argument("--person-at", action="append", metavar="번호@시작-끝=효과", help="인물별 구간 효과")
+        sp.add_argument("--clear-at", action="append", metavar="번호", help="인물의 구간 효과 지우기")
         sp.add_argument("-o", "--output", help="출력 파일 (기본: 원본이름_mosaic.mp4)")
         sp.add_argument("--debug", action="store_true", help="상자와 인물 번호 표시")
 

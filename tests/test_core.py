@@ -106,3 +106,40 @@ def test_project_save_load_roundtrip(tmp_path):
     assert q.tracks[0].sources == ["auto", "interp"]
     assert q.persons[0].effect == {"type": "blur", "value": 20.0}
     assert q.effect_for(0)["type"] == "blur"
+
+
+def _project(tmp_path, n=100):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"")
+    info = VideoInfo(str(video), 1920, 1080, 10.0, "10/1", n, 0, False, "h264", 0, {}, True)
+    return Project(info, n, [], {}, {0: Person("인물 0", [], [], parse_effect("sticker:smile"))},
+                   pts=[i / 10 for i in range(n)])
+
+
+def test_segment_overrides_person_effect_only_inside_range(tmp_path):
+    p = _project(tmp_path)
+    p.add_segment(0, p.frame_at(2.0), p.frame_at(4.0), parse_effect("sticker:heart"))
+    assert p.effect_for(0, 19)["value"] == "smile"
+    assert p.effect_for(0, 20)["value"] == "heart"
+    assert p.effect_for(0, 39)["value"] == "heart"
+    assert p.effect_for(0, 40)["value"] == "smile"
+    assert p.effect_for(0)["value"] == "smile"  # 시점 없이 물으면 인물 기본 효과
+
+
+def test_later_segment_wins_and_segments_survive_save(tmp_path):
+    p = _project(tmp_path)
+    p.add_segment(0, 10, 50, parse_effect("blur"))
+    p.add_segment(0, 30, 40, parse_effect("none"))
+    p.add_segment(0, 90, 500, parse_effect("mosaic"))  # 영상 끝을 넘으면 잘림
+    p.save()
+    q = Project.load(p.video.path)
+    assert q.effect_for(0, 20)["type"] == "blur"
+    assert q.effect_for(0, 35)["type"] == "none"
+    assert q.persons[0].segments[-1]["end"] == 100
+
+
+def test_parse_time_formats():
+    from blurface.cli import parse_time
+    assert parse_time("12") == 12
+    assert parse_time("1:05.5") == 65.5
+    assert parse_time("1:00:00") == 3600

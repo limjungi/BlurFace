@@ -56,7 +56,7 @@ def fill_and_smooth(obs: dict[int, tuple], max_gap: int, extend: int, lo: int, h
     return {f: (*smoothed[i], out[f][4], out[f][5]) for i, f in enumerate(keys)}
 
 
-def analyze(video: str | Path, progress=None, log=print) -> Project:
+def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project:
     info = probe(video)
     timings: dict[str, float] = {}
     t0 = time.perf_counter()
@@ -70,7 +70,11 @@ def analyze(video: str | Path, progress=None, log=print) -> Project:
     embs: dict[tuple[int, int], np.ndarray] = {}
     prev_sig = None
     n = 0
-    for i, _pts, img in iter_frames(info, ANALYSIS_SIDE):
+    pts_list: list[float] = []
+    for i, pts, img in iter_frames(info, ANALYSIS_SIDE):
+        if cancel and cancel():
+            raise InterruptedError("분석 취소됨")
+        pts_list.append(pts)
         sig = signature(img)
         diffs_sigs.append(0.0 if prev_sig is None else differences([prev_sig, sig])[1])
         prev_sig = sig
@@ -138,7 +142,8 @@ def analyze(video: str | Path, progress=None, log=print) -> Project:
             p.thumb = [best[0], *best[1][:4]]
     timings["track_cluster"] = time.perf_counter() - t1
 
-    project = Project(info, n, cuts, tracks, persons, timings=timings)
+    t_first = pts_list[0] if pts_list else 0.0  # 영상 시작을 0초로
+    project = Project(info, n, cuts, tracks, persons, timings=timings, pts=[t - t_first for t in pts_list])
     project.timings["total_analyze"] = time.perf_counter() - t0
     project.save()
     write_person_sheet(project)
