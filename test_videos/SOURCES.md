@@ -8,3 +8,4 @@
 | l-aV3qt6dKw_1080p.mp4 | https://youtu.be/l-aV3qt6dKw | Free Stock Footage |
 | CGgFySUbnYg_1080p.mp4 | https://youtu.be/CGgFySUbnYg | Free Stock Footage |
 | sample_fhd_cuts.mp4 | 위 Free Stock Footage 3개 클립을 이어 붙여 만든 가상 완성본 (컷 3회, 첫 장면 인물 재등장) | - |
+| sample_iphone_like.mov | sample_fhd_cuts.mp4 앞 12초를 아이폰처럼 변환 (HEVC 10bit HLG, 회전 정보 -90) | - |
