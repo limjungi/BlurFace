@@ -1,4 +1,4 @@
-"""내보내기: 원본 해상도·보이는 방향으로 디코딩 → 인물별 효과 → FFmpeg(VideoToolbox HEVC) 인코딩, 오디오는 원본 복사."""
+"""내보내기: 원본 해상도·보이는 방향으로 디코딩 → 인물별(구간별) 효과 → FFmpeg(VideoToolbox HEVC), 오디오는 원본 복사."""
 
 from __future__ import annotations
 
@@ -7,10 +7,28 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from .effects import apply, expand_box
 from .project import Project
 from .video import color_tags, iter_frames
+
+SOURCE_COLORS = {"auto": (0, 1, 0), "interp": (0, 0.8, 1), "manual": (1, 0, 1)}  # BGR 비율
+
+
+def compose(img: np.ndarray, frame: int, p: Project, per: dict, scale: float = 1.0, debug: bool = False):
+    """한 프레임에 효과를 입힌다. 내보내기와 미리보기가 같이 쓴다. scale은 미리보기 축소 비율."""
+    h, w = img.shape[:2]
+    hi = 65535 if img.dtype == np.uint16 else 255
+    for tid, b, src in per.get(frame, []):
+        pid = p.tracks[tid].person
+        box = expand_box([x * scale for x in b[:4]], w, h)
+        apply(img, box, p.effect_for(pid, frame))
+        if debug:
+            color = tuple(c * hi for c in SOURCE_COLORS[src])
+            cv2.rectangle(img, box[:2], box[2:], color, max(1, int(3 * scale)))
+            cv2.putText(img, f"#{pid}", (box[0], max(20, box[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
+                        max(0.5, scale), color, max(1, int(2 * scale)))
 
 
 def encoder_args(p: Project) -> list[str]:
@@ -30,7 +48,8 @@ def encoder_args(p: Project) -> list[str]:
     return args
 
 
-def render(p: Project, out: str | Path, debug: bool = False, progress=None) -> float:
+def render(p: Project, out: str | Path, debug: bool = False, progress=None, cancel=None) -> float:
+    """cancel: 호출 시 True를 돌려주면 중단 (화면에서 취소 버튼용). 중단되면 출력 파일을 지운다."""
     v = p.video
     v.color = color_tags(v.path)  # 저장된 분석이 오래됐어도 원본 색 정보를 그대로 따르도록 매번 다시 읽음
     out = Path(out)
@@ -42,26 +61,23 @@ def render(p: Project, out: str | Path, debug: bool = False, progress=None) -> f
            *encoder_args(p), "-shortest", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     per = p.boxes_by_frame()
-    effects = {pid: p.effect_for(pid) for pid in p.persons}
     t0 = time.perf_counter()
+    cancelled = False
     try:
         for i, _pts, img in iter_frames(v, high_bit=v.high_bit):
-            for tid, b, src in per.get(i, []):
-                pid = p.tracks[tid].person
-                box = expand_box(b, v.width, v.height)
-                apply(img, box, effects.get(pid, p.default_effect))
-                if debug:
-                    hi = 65535 if img.dtype.itemsize == 2 else 255
-                    color = {"auto": (0, hi, 0), "interp": (0, hi * 0.8, hi), "manual": (hi, 0, hi)}[src]
-                    cv2.rectangle(img, box[:2], box[2:], color, 3)
-                    cv2.putText(img, f"P{pid} T{tid}", (box[0], max(20, box[1] - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+            if cancel and cancel():
+                cancelled = True
+                break
+            compose(img, i, p, per, debug=debug)
             proc.stdin.write(img.tobytes())
-            if progress and i % 30 == 0:
+            if progress and i % 15 == 0:
                 progress(i, p.n_frames)
     finally:
         proc.stdin.close()
         proc.wait()
+    if cancelled:
+        out.unlink(missing_ok=True)
+        raise InterruptedError("내보내기 취소됨")
     if proc.returncode:
         raise RuntimeError(f"ffmpeg 인코딩 실패 (코드 {proc.returncode})")
     return time.perf_counter() - t0

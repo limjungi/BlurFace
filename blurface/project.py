@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .video import VideoInfo
 
-VERSION = 1
+VERSION = 2  # 2: 프레임 시각(pts), 구간 효과 추가
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
 DEFAULT_EFFECT = {"type": "mosaic", "value": 8}
@@ -55,6 +55,8 @@ class Person:
     tracks: list[int]
     thumb: list[float]  # [frame, x1, y1, x2, y2]
     effect: dict | None = None  # None이면 기본 효과
+    # 구간 효과: [{"start": 시작 프레임, "end": 끝 프레임(포함 안 함), "effect": {...}}]. 겹치면 나중 것이 우선
+    segments: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -66,6 +68,7 @@ class Project:
     persons: dict[int, Person] = field(default_factory=dict)
     default_effect: dict = field(default_factory=lambda: dict(DEFAULT_EFFECT))
     timings: dict = field(default_factory=dict)
+    pts: list[float] = field(default_factory=list)  # 프레임별 시각(초)
 
     @staticmethod
     def dir_for(video: str | Path) -> Path:
@@ -76,9 +79,33 @@ class Project:
     def dir(self) -> Path:
         return self.dir_for(self.video.path)
 
-    def effect_for(self, pid: int) -> dict:
+    def effect_for(self, pid: int, frame: int | None = None) -> dict:
+        """frame을 주면 그 시점의 구간 효과까지 반영한 효과."""
         p = self.persons.get(pid)
-        return p.effect if p and p.effect else self.default_effect
+        if p is None:
+            return self.default_effect
+        if frame is not None:
+            for seg in reversed(p.segments):
+                if seg["start"] <= frame < seg["end"]:
+                    return seg["effect"]
+        return p.effect or self.default_effect
+
+    def add_segment(self, pid: int, start: int, end: int, effect: dict):
+        start, end = max(0, min(start, end)), min(self.n_frames, max(start, end))
+        if end > start:
+            self.persons[pid].segments.append({"start": start, "end": end, "effect": effect})
+
+    def frame_at(self, seconds: float) -> int:
+        """시각(초) → 프레임 번호."""
+        if self.pts:
+            import bisect
+            return min(len(self.pts) - 1, bisect.bisect_left(self.pts, seconds - 1e-6))
+        return int(round(seconds * self.video.fps))
+
+    def time_of(self, frame: int) -> float:
+        if self.pts and 0 <= frame < len(self.pts):
+            return self.pts[frame]
+        return frame / self.video.fps
 
     def needs_review(self, pid: int) -> bool:
         """점수가 낮거나 아주 잠깐 나온 인물 (손·뒤통수 같은 오검출이거나 흐린 얼굴일 수 있음)."""
@@ -110,6 +137,7 @@ class Project:
                                 "boxes": [[round(x, 1) for x in b[:4]] + [round(b[4], 3)] for b in t.boxes],
                                 "sources": t.sources} for k, t in self.tracks.items()},
             "timings": self.timings,
+            "pts": [round(x, 6) for x in self.pts],
         }
         path.write_text(json.dumps(data, ensure_ascii=False))
         return path
@@ -123,7 +151,7 @@ class Project:
         if d.get("version") != VERSION:
             return None
         p = cls(VideoInfo(**d["video"]), d["n_frames"], d["cuts"], default_effect=d["default_effect"],
-                timings=d.get("timings", {}))
+                timings=d.get("timings", {}), pts=d.get("pts", []))
         p.persons = {int(k): Person(**v) for k, v in d["persons"].items()}
         p.tracks = {int(k): Track(**v) for k, v in d["tracks"].items()}
         return p
