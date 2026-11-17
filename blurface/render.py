@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import subprocess
 import time
+from fractions import Fraction
 from pathlib import Path
 
+import av
 import cv2
 import numpy as np
 
 from .effects import apply, expand_box
 from .project import Project
-from .video import color_tags, iter_frames
+from .video import color_tags, iter_frames, video_time_base
 
 SOURCE_COLORS = {"auto": (0, 1, 0), "interp": (0, 0.8, 1), "manual": (1, 0, 1)}  # BGR 비율
 
@@ -55,29 +57,45 @@ def render(p: Project, out: str | Path, debug: bool = False, progress=None, canc
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     pix = "bgr48le" if v.high_bit else "bgr24"
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{v.width}x{v.height}", "-r", v.rate, "-i", "-",
+    tb = video_time_base(v)
+    # 프레임을 원본 시각(pts)과 함께 NUT 형식으로 넘겨 가변 프레임레이트 영상도 소리와 어긋나지 않게 한다
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "nut", "-i", "-",
            "-i", v.path, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",
-           *encoder_args(p), "-shortest", str(out)]
+           *encoder_args(p), "-fps_mode", "passthrough", "-enc_time_base:v", "demux", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     per = p.boxes_by_frame()
     t0 = time.perf_counter()
-    cancelled = False
+    cancelled = broken = False
     try:
-        for i, _pts, img in iter_frames(v, high_bit=v.high_bit):
-            if cancel and cancel():
-                cancelled = True
-                break
-            compose(img, i, p, per, debug=debug)
-            proc.stdin.write(img.tobytes())
-            if progress and i % 15 == 0:
-                progress(i, p.n_frames)
+        with av.open(proc.stdin, "w", format="nut") as mux:
+            vs = mux.add_stream("rawvideo", rate=Fraction(v.rate))
+            vs.width, vs.height, vs.pix_fmt = v.width, v.height, pix
+            vs.time_base = vs.codec_context.time_base = tb
+            for i, pts, img in iter_frames(v, high_bit=v.high_bit, raw_pts=True):
+                if cancel and cancel():
+                    cancelled = True
+                    break
+                compose(img, i, p, per, debug=debug)
+                frame = av.VideoFrame.from_ndarray(img, format=pix)
+                frame.pts, frame.time_base = pts, tb
+                for packet in vs.encode(frame):
+                    mux.mux(packet)
+                if progress and i % 15 == 0:
+                    progress(i, p.n_frames)
+            for packet in vs.encode(None):
+                mux.mux(packet)
+    except BrokenPipeError:
+        broken = True  # ffmpeg가 먼저 끝남 (오류)
     finally:
-        proc.stdin.close()
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
         proc.wait()
     if cancelled:
         out.unlink(missing_ok=True)
         raise InterruptedError("내보내기 취소됨")
-    if proc.returncode:
+    if proc.returncode or broken:
+        out.unlink(missing_ok=True)
         raise RuntimeError(f"ffmpeg 인코딩 실패 (코드 {proc.returncode})")
     return time.perf_counter() - t0

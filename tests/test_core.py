@@ -143,3 +143,15 @@ def test_parse_time_formats():
     assert parse_time("12") == 12
     assert parse_time("1:05.5") == 65.5
     assert parse_time("1:00:00") == 3600
+
+
+def test_sticker_gaps_are_blurred_not_original():
+    rng = np.random.default_rng(1)
+    img = (rng.random((300, 300, 3)) * 255).astype(np.uint8)
+    before = img.copy()
+    box = (100, 100, 200, 200)
+    apply(img, box, parse_effect("sticker:heart"))
+    # 하트 아래쪽 모서리는 투명한 곳 → 원본 그대로가 아니라 흐려져 있어야 함
+    corner = (slice(185, 199), slice(101, 115))
+    assert not np.array_equal(img[corner], before[corner])
+    assert img[corner].std() < before[corner].std() / 2

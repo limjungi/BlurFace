@@ -12,6 +12,8 @@ from . import Detector, nms
 
 STRIDES = (8, 16, 32)
 NUM_ANCHORS = 2
+X_COLS = [0, 2, 5, 7, 9, 11, 13]  # 상자 x1, x2와 키포인트 x
+Y_COLS = [1, 3, 6, 8, 10, 12, 14]
 
 
 def fixed_size_model(model_path: str, size: int) -> str:
@@ -37,7 +39,7 @@ def fixed_size_model(model_path: str, size: int) -> str:
 
 class SCRFD(Detector):
     def __init__(self, model_path: str, input_size: int = 640, score_thresh: float = 0.5,
-                 nms_thresh: float = 0.4, use_coreml: bool = True):
+                 nms_thresh: float = 0.4, use_coreml: bool = True, edge_pad: float = 0.0):
         providers = ["CPUExecutionProvider"]
         if use_coreml:
             providers.insert(0, "CoreMLExecutionProvider")
@@ -49,6 +51,10 @@ class SCRFD(Detector):
         self.nms_thresh = nms_thresh
         self.name = f"scrfd{input_size}" + ("" if use_coreml else "_cpu")
         self._centers: dict[int, np.ndarray] = {}
+        # 화면 가장자리에 걸친 얼굴은 주변 맥락이 없어 놓치기 쉽다. 테두리를 붙인 이미지로 한 번 더 검출해 합친다.
+        self.edge_pad = edge_pad
+        if edge_pad:
+            self.name += f"_edge{int(edge_pad * 100)}"
 
     def _anchor_centers(self, stride: int) -> np.ndarray:
         if stride not in self._centers:
@@ -58,7 +64,21 @@ class SCRFD(Detector):
             self._centers[stride] = np.repeat(c, NUM_ANCHORS, axis=0)
         return self._centers[stride]
 
-    def detect(self, bgr: np.ndarray) -> np.ndarray:
+    def detect(self, bgr: np.ndarray, edge: bool = True) -> np.ndarray:
+        """edge=False면 이번 프레임은 가장자리 검출을 건너뜀 (속도 조절용)."""
+        dets = self._detect(bgr)
+        if not self.edge_pad or not edge:
+            return dets
+        h, w = bgr.shape[:2]
+        px, py = int(w * self.edge_pad), int(h * self.edge_pad)
+        padded = self._detect(cv2.copyMakeBorder(bgr, py, py, px, px, cv2.BORDER_CONSTANT, value=0))
+        if not len(padded):
+            return dets
+        padded[:, X_COLS] -= px
+        padded[:, Y_COLS] -= py
+        return nms(np.concatenate([dets, padded]), self.nms_thresh)
+
+    def _detect(self, bgr: np.ndarray) -> np.ndarray:
         h, w = bgr.shape[:2]
         scale = self.size / max(h, w)
         resized = cv2.resize(bgr, (round(w * scale), round(h * scale)))

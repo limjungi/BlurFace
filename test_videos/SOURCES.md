@@ -9,3 +9,4 @@
 | CGgFySUbnYg_1080p.mp4 | https://youtu.be/CGgFySUbnYg | Free Stock Footage |
 | sample_fhd_cuts.mp4 | 위 Free Stock Footage 3개 클립을 이어 붙여 만든 가상 완성본 (컷 3회, 첫 장면 인물 재등장) | - |
 | sample_iphone_like.mov | sample_fhd_cuts.mp4 앞 12초를 아이폰처럼 변환 (HEVC 10bit HLG, 회전 정보 -90) | - |
+| sample_vfr.mp4 | sample_fhd_cuts.mp4에서 10프레임마다 3프레임을 빼서 만든 가변 프레임레이트 영상 (소리는 그대로) | - |
