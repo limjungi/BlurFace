@@ -111,7 +111,7 @@ def apply(img: np.ndarray, box, effect: dict):
         blur(img, box, value or 30)
     elif kind == "solid":
         solid(img, box, value or "#000000")
-    elif kind == "sticker":
-        overlay(img, box, builtin_sticker(value or "smile"))
-    elif kind == "image":
-        overlay(img, box, load_image(value))
+    elif kind in ("sticker", "image"):
+        # 스티커의 투명한 틈(하트 모양 바깥 등)으로 얼굴이 보이지 않도록 먼저 강하게 흐린 뒤 얹는다
+        blur(img, box, 60)
+        overlay(img, box, builtin_sticker(value or "smile") if kind == "sticker" else load_image(value))
