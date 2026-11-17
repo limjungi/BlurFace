@@ -33,6 +33,12 @@ class Track:
     velocity: np.ndarray = field(default_factory=lambda: np.zeros(4))
     hits: int = 1
     observations: dict[int, tuple[float, float, float, float, float]] = field(default_factory=dict)
+    refs: dict[int, int] = field(default_factory=dict)  # 프레임 -> 그 프레임 검출 목록에서의 번호 (6번째 열이 있을 때)
+
+    def observe(self, frame: int, det: np.ndarray):
+        self.observations[frame] = tuple(float(x) for x in det[:5])
+        if len(det) > 5:
+            self.refs[frame] = int(det[5])
 
     def predict(self, frame: int) -> np.ndarray:
         return self.box + self.velocity * (frame - self.last_frame)
@@ -44,7 +50,7 @@ class Track:
         self.box = det[:4].copy()
         self.last_frame = frame
         self.hits += 1
-        self.observations[frame] = tuple(float(x) for x in det[:5])
+        self.observe(frame, det)
 
 
 class Tracker:
@@ -83,7 +89,7 @@ class Tracker:
 
         for j in un_d:
             t = Track(self.next_id, high[j][:4].copy(), frame)
-            t.observations[frame] = tuple(float(x) for x in high[j][:5])
+            t.observe(frame, high[j])
             self.next_id += 1
             self.active.append(t)
 
