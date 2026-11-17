@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# 테스트 영상·결과물 (용량 큼, 출처는 test_videos/SOURCES.md)
+test_videos/*.mp4
+test_videos/*.mov
+test_videos/*.webm
+output/
+
+# AI 모델 파일 (스크립트로 받음)
+models/*.onnx
+models/*.mlmodel*
+
+# 프로젝트 작업 폴더
+*.blurface/
