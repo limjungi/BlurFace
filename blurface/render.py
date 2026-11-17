@@ -1,4 +1,4 @@
-"""효과 적용 후 내보내기. 원본 해상도로 디코딩 → 얼굴 영역 모자이크 → FFmpeg(VideoToolbox) 인코딩, 오디오는 원본 복사."""
+"""내보내기: 원본 해상도·보이는 방향으로 디코딩 → 인물별 효과 → FFmpeg(VideoToolbox HEVC) 인코딩, 오디오는 원본 복사."""
 
 from __future__ import annotations
 
@@ -6,77 +6,62 @@ import subprocess
 import time
 from pathlib import Path
 
-import av
 import cv2
-import numpy as np
 
-from .analyze import Analysis
-
-
-def expand(box, w, h, pad_x=0.15, pad_top=0.3, pad_bottom=0.1):
-    x1, y1, x2, y2 = box
-    bw, bh = x2 - x1, y2 - y1
-    return (max(0, int(x1 - bw * pad_x)), max(0, int(y1 - bh * pad_top)),
-            min(w, int(x2 + bw * pad_x)), min(h, int(y2 + bh * pad_bottom)))
+from .effects import apply, expand_box
+from .project import Project
+from .video import color_tags, iter_frames
 
 
-def mosaic(img: np.ndarray, box, blocks: int = 10):
-    x1, y1, x2, y2 = box
-    roi = img[y1:y2, x1:x2]
-    if roi.size == 0:
-        return
-    rw, rh = roi.shape[1], roi.shape[0]
-    bs = max(4, rw // blocks)
-    small = cv2.resize(roi, (max(1, rw // bs), max(1, rh // bs)), interpolation=cv2.INTER_AREA)
-    img[y1:y2, x1:x2] = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
+def encoder_args(p: Project) -> list[str]:
+    v = p.video
+    bitrate = v.bitrate or int(v.width * v.height * v.fps * 0.1)
+    args = ["-c:v", "hevc_videotoolbox", "-b:v", str(int(bitrate * 1.1)), "-tag:v", "hvc1"]
+    if v.high_bit:
+        args += ["-profile:v", "main10", "-pix_fmt", "p010le"]
+    else:
+        args += ["-pix_fmt", "yuv420p"]
+    # 원본 색 정보(HDR 등) 유지: primaries/trc는 출력 옵션만으로는 변환 과정에서 빠져서 프레임에 직접 붙인다
+    params = [f"{k}={v.color[k]}" for k in ("color_primaries", "color_trc") if k in v.color]
+    if params:
+        args += ["-vf", "setparams=" + ":".join(params)]
+    for k, val in v.color.items():
+        args += [f"-{k}", val]
+    return args
 
 
-def frame_boxes(a: Analysis) -> dict[int, list]:
-    per = {}
-    for tid, boxes in a.tracks.items():
-        for f, b in boxes.items():
-            per.setdefault(f, []).append((tid, b))
-    return per
-
-
-def render(src: Path, a: Analysis, out: Path, debug: bool = False) -> float:
-    with av.open(str(src)) as c:
-        vs = c.streams.video[0]
-        rate = vs.average_rate
-        bitrate = vs.bit_rate or c.bit_rate or 12_000_000
-        cc = vs.codec_context
-        color = []
-        for opt, val in (("-color_primaries", cc.color_primaries), ("-color_trc", cc.color_trc),
-                         ("-colorspace", cc.colorspace)):
-            name = getattr(val, "name", None)
-            if name and name.lower() not in ("unspecified", "reserved"):
-                color += [opt, name.lower()]
-        has_audio = bool(c.streams.audio)
-
+def render(p: Project, out: str | Path, debug: bool = False, progress=None) -> float:
+    v = p.video
+    v.color = color_tags(v.path)  # 저장된 분석이 오래됐어도 원본 색 정보를 그대로 따르도록 매번 다시 읽음
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pix = "bgr48le" if v.high_bit else "bgr24"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{a.width}x{a.height}", "-r", str(rate), "-i", "-",
-           "-i", str(src), "-map", "0:v"] + (["-map", "1:a", "-c:a", "copy"] if has_audio else []) + [
-           "-c:v", "hevc_videotoolbox", "-b:v", str(int(bitrate * 1.2)), "-tag:v", "hvc1",
-           "-pix_fmt", "yuv420p", *color, "-shortest", str(out)]
+           "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{v.width}x{v.height}", "-r", v.rate, "-i", "-",
+           "-i", v.path, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",
+           *encoder_args(p), "-shortest", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    per = frame_boxes(a)
+    per = p.boxes_by_frame()
+    effects = {pid: p.effect_for(pid) for pid in p.persons}
     t0 = time.perf_counter()
-    with av.open(str(src)) as c:
-        s = c.streams.video[0]
-        s.thread_type = "AUTO"
-        for i, frame in enumerate(c.decode(s)):
-            img = frame.to_ndarray(format="bgr24")
-            for tid, b in per.get(i, []):
-                box = expand(b[:4], a.width, a.height)
-                mosaic(img, box)
+    try:
+        for i, _pts, img in iter_frames(v, high_bit=v.high_bit):
+            for tid, b, src in per.get(i, []):
+                pid = p.tracks[tid].person
+                box = expand_box(b, v.width, v.height)
+                apply(img, box, effects.get(pid, p.default_effect))
                 if debug:
-                    color = (0, 255, 0) if b[5] == "auto" else (0, 200, 255)
+                    hi = 65535 if img.dtype.itemsize == 2 else 255
+                    color = {"auto": (0, hi, 0), "interp": (0, hi * 0.8, hi), "manual": (hi, 0, hi)}[src]
                     cv2.rectangle(img, box[:2], box[2:], color, 3)
-                    cv2.putText(img, f"#{tid}", (box[0], box[1] - 8), cv2.FONT_HERSHEY_SIMPLEX,
-                                1.2, color, 3)
+                    cv2.putText(img, f"P{pid} T{tid}", (box[0], max(20, box[1] - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
             proc.stdin.write(img.tobytes())
-    proc.stdin.close()
-    proc.wait()
+            if progress and i % 30 == 0:
+                progress(i, p.n_frames)
+    finally:
+        proc.stdin.close()
+        proc.wait()
     if proc.returncode:
-        raise RuntimeError(f"ffmpeg 실패 ({proc.returncode})")
+        raise RuntimeError(f"ffmpeg 인코딩 실패 (코드 {proc.returncode})")
     return time.perf_counter() - t0
