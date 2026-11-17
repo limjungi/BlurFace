@@ -62,13 +62,23 @@ def probe(path: str | Path) -> VideoInfo:
                          cc.name, int(s.bit_rate or c.bit_rate or 0), color, bool(c.streams.audio))
 
 
-def iter_frames(info: VideoInfo, max_side: int | None = None, high_bit: bool = False):
-    """(프레임 번호, pts 초, BGR 이미지)를 순서대로 돌려준다. high_bit이면 uint16(bgr48)."""
+def video_time_base(info: VideoInfo):
+    with av.open(info.path) as c:
+        return c.streams.video[0].time_base
+
+
+def iter_frames(info: VideoInfo, max_side: int | None = None, high_bit: bool = False, raw_pts: bool = False):
+    """(프레임 번호, pts 초, BGR 이미지)를 순서대로 돌려준다. high_bit이면 uint16(bgr48).
+
+    raw_pts이면 pts를 초 대신 스트림 시간 단위 정수로 돌려준다 (내보낼 때 원본 시각을 그대로 쓰기 위함).
+    """
     fmt = "bgr48le" if high_bit else "bgr24"
     with av.open(info.path) as c:
         s = c.streams.video[0]
         s.thread_type = "AUTO"
         tb = float(s.time_base)
+        step = max(1, round(1 / (tb * float(s.average_rate or 30))))
+        last = None
         for i, frame in enumerate(c.decode(s)):
             kw = {}
             if max_side:
@@ -79,4 +89,12 @@ def iter_frames(info: VideoInfo, max_side: int | None = None, high_bit: bool = F
             img = frame.to_ndarray(format=fmt, **kw)
             if info.rotation:
                 img = cv2.rotate(img, ROTATE[info.rotation])
-            yield i, (frame.pts or 0) * tb, np.ascontiguousarray(img)
+            if raw_pts:
+                # pts가 없거나 거꾸로 가는 드문 경우에도 계속 늘어나게
+                pts = frame.pts if frame.pts is not None else (last + step if last is not None else 0)
+                if last is not None and pts <= last:
+                    pts = last + 1
+                last = pts
+                yield i, pts, np.ascontiguousarray(img)
+            else:
+                yield i, (frame.pts or 0) * tb, np.ascontiguousarray(img)
