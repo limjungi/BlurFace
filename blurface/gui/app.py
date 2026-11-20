@@ -10,11 +10,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout, QGroupBox,
+                               QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QToolBar, QVBoxLayout, QWidget)
 
+import cv2
+
+from ..effects import grow, shrink
+from ..persons import face_crop
 from ..project import Project
 from ..render import compose
 from ..video import probe
@@ -24,6 +29,7 @@ from .workers import AnalyzeWorker, ExportWorker
 
 ALL = -1  # 인물 목록의 "모든 인물 기본 효과" 항목
 VIDEO_EXT = "영상 (*.mp4 *.mov *.m4v *.mkv *.avi *.webm)"
+UNDO_LIMIT = 200
 
 
 def fmt_time(sec: float) -> str:
@@ -39,14 +45,17 @@ class MainWindow(QMainWindow):
 
         self.project: Project | None = None
         self.source: FrameSource | None = None
-        self.per: dict = {}
         self.frame = 0
         self.n_frames = 0
         self.fps = 30.0
         self.selected: int | None = None
         self.worker = None
         self._threads: set = set()  # 스레드가 완전히 끝날 때까지 참조 유지 (먼저 지우면 앱이 죽음)
-        self.show_boxes = False
+        self.sel_track: int | None = None  # 미리보기에서 선택한 상자(트랙)
+        self.review: list[tuple[int, str]] = []
+        self._undo: list[dict] = []
+        self._redo: list[dict] = []
+        self._last_state: dict | None = None
         self.play_timer = QTimer(self, interval=5)
         self.play_timer.timeout.connect(self._tick)
         self._play_start = (0.0, 0)
@@ -65,26 +74,45 @@ class MainWindow(QMainWindow):
         self.act_open = QAction("열기", self, shortcut=QKeySequence.StandardKey.Open, triggered=self.open_dialog)
         self.act_reanalyze = QAction("다시 분석", self, triggered=self.reanalyze)
         self.act_export = QAction("내보내기", self, shortcut="Ctrl+E", triggered=self.export)
-        self.act_boxes = QAction("상자 표시", self, checkable=True, shortcut="B", triggered=self._toggle_boxes)
+        self.act_undo = QAction("실행 취소", self, shortcut=QKeySequence.StandardKey.Undo, triggered=self.undo)
+        self.act_redo = QAction("다시 실행", self, shortcut=QKeySequence.StandardKey.Redo, triggered=self.redo)
+        self.act_boxes = QAction("상자 편집", self, checkable=True, shortcut="B", triggered=self._toggle_boxes)
+        self.act_next = QAction("다음 확인 지점", self, shortcut="N", triggered=self.next_review)
         for a in (self.act_open, self.act_reanalyze, self.act_export):
             tb.addAction(a)
         tb.addSeparator()
-        tb.addAction(self.act_boxes)
+        for a in (self.act_undo, self.act_redo):
+            tb.addAction(a)
+        tb.addSeparator()
+        for a in (self.act_boxes, self.act_next):
+            tb.addAction(a)
 
     def _build_body(self):
         # 왼쪽: 인물 목록
         self.persons = QListWidget()
         self.persons.setIconSize(QSize(56, 56))
         self.persons.setSpacing(2)
+        self.persons.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.persons.currentItemChanged.connect(self._on_person_selected)
+        self.persons.itemSelectionChanged.connect(self._update_enabled)
+        self.merge_btn = QPushButton("선택한 인물 합치기")
+        self.merge_btn.setToolTip("⌘-클릭으로 여러 명을 고른 뒤 누르면 한 사람으로 합칩니다 (번호가 가장 작은 사람 설정을 따름)")
+        self.merge_btn.clicked.connect(self.merge_selected)
+        self.del_person_btn = QPushButton("인물 삭제 (얼굴 아님)")
+        self.del_person_btn.clicked.connect(self.delete_selected_persons)
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(8, 8, 4, 8)
         lv.addWidget(label("인물"))
         lv.addWidget(self.persons)
+        lv.addWidget(self.merge_btn)
+        lv.addWidget(self.del_person_btn)
 
         # 가운데: 영상 + 재생 + 타임라인
         self.view = VideoView()
+        self.view.box_clicked.connect(self._on_box_clicked)
+        self.view.box_changed.connect(self._on_box_changed)
+        self.view.box_drawn.connect(self._on_box_drawn)
         self.play_btn = QPushButton("▶")
         self.play_btn.setFixedWidth(44)
         self.play_btn.clicked.connect(self.toggle_play)
@@ -95,7 +123,8 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.play_btn)
         controls.addWidget(self.time_label)
         controls.addStretch()
-        controls.addWidget(label("Space 재생 · ←/→ 1프레임 · ⇧←/→ 1초 · I/O 구간 시작/끝 · B 상자", muted=True))
+        controls.addWidget(label("Space 재생 · ←/→ 1프레임 · ⇧←/→ 1초 · I/O 구간 시작/끝 · B 상자 편집 · N 확인 지점",
+                                 muted=True))
         center = QWidget()
         cv = QVBoxLayout(center)
         cv.setContentsMargins(4, 8, 4, 8)
@@ -153,12 +182,50 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.seg_table, 1)
         sv.addWidget(self.seg_del)
 
+        box_box = QGroupBox("상자 수정 (B로 켜기)")
+        bv = QVBoxLayout(box_box)
+        tip = label("빈 곳을 끌면 새 상자 · 상자를 끌면 이동 · 모서리로 크기 조절. "
+                    "고친 프레임 사이는 자동으로 이어집니다.", muted=True)
+        tip.setWordWrap(True)
+        bv.addWidget(tip)
+        self.track_label = label("선택한 상자 없음", muted=True)
+        bv.addWidget(self.track_label)
+        self.btn_del_frame = QPushButton("이 프레임만 지우기")
+        self.btn_del_frame.clicked.connect(lambda: self._track_edit("frame"))
+        self.btn_del_range = QPushButton("시작~끝 구간 지우기")
+        self.btn_del_range.clicked.connect(lambda: self._track_edit("range"))
+        self.btn_del_track = QPushButton("이 상자 전부 지우기 (⌫)")
+        self.btn_del_track.clicked.connect(lambda: self._track_edit("track"))
+        self.btn_split = QPushButton("여기부터 다른 사람 (S)")
+        self.btn_split.setToolTip("두 사람이 한 상자로 이어졌을 때: 현재 프레임부터 새 인물로 떼어냅니다")
+        self.btn_split.clicked.connect(lambda: self._track_edit("split"))
+        self.btn_reset = QPushButton("손댄 것 되돌리기")
+        self.btn_reset.setToolTip("이 상자의 위치·크기 수정을 모두 지우고 자동 결과로 돌아갑니다 (지운 구간은 유지)")
+        self.btn_reset.clicked.connect(lambda: self._track_edit("reset"))
+        self.assign_combo = QComboBox()
+        self.assign_btn = QPushButton("인물 바꾸기")
+        self.assign_btn.clicked.connect(lambda: self._track_edit("assign"))
+        for a, b in ((self.btn_del_frame, self.btn_del_range), (self.btn_del_track, self.btn_split)):
+            row = QHBoxLayout()
+            row.addWidget(a)
+            row.addWidget(b)
+            bv.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(self.assign_combo, 1)
+        row.addWidget(self.assign_btn)
+        bv.addLayout(row)
+        bv.addWidget(self.btn_reset)
+        self.track_btns = [self.btn_del_frame, self.btn_del_range, self.btn_del_track, self.btn_split,
+                           self.btn_reset, self.assign_combo, self.assign_btn]
+
         self.right = QWidget()
         rv = QVBoxLayout(self.right)
         rv.setContentsMargins(4, 8, 8, 8)
         rv.addWidget(base_box)
+        rv.addWidget(box_box)
         rv.addWidget(seg_box, 1)
         self.seg_box = seg_box
+        self.base_box = base_box
 
         split = QSplitter()
         split.addWidget(left)
@@ -182,7 +249,9 @@ class MainWindow(QMainWindow):
         for key, fn in [("Space", self.toggle_play), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)),
                         ("Shift+Left", lambda: self.step(-round(self.fps))),
                         ("Shift+Right", lambda: self.step(round(self.fps))),
-                        ("I", self.mark_in), ("O", self.mark_out)]:
+                        ("I", self.mark_in), ("O", self.mark_out),
+                        ("Backspace", lambda: self._track_edit("track")), ("Delete", lambda: self._track_edit("track")),
+                        ("S", lambda: self._track_edit("split"))]:
             QShortcut(QKeySequence(key), self, activated=fn)
 
     def _update_enabled(self):
@@ -191,10 +260,20 @@ class MainWindow(QMainWindow):
         busy = self.worker is not None
         self.act_reanalyze.setEnabled(has_video and not busy)
         self.act_export.setEnabled(has_project and not busy)
-        self.right.setEnabled(has_project and self.selected is not None)
+        self.act_undo.setEnabled(has_project and bool(self._undo))
+        self.act_redo.setEnabled(has_project and bool(self._redo))
+        self.act_next.setEnabled(has_project and bool(self.review))
+        self.right.setEnabled(has_project)
+        self.base_box.setEnabled(has_project and self.selected is not None)
         self.seg_box.setEnabled(has_project and self.selected not in (None, ALL))
         self.goto_btn.setEnabled(self.selected not in (None, ALL))
         self.name_edit.setEnabled(self.selected not in (None, ALL))
+        has_track = has_project and self.sel_track is not None and self.sel_track in self.project.tracks
+        for b in self.track_btns:
+            b.setEnabled(has_track)
+        picked = self._picked_persons()
+        self.merge_btn.setEnabled(len(picked) >= 2)
+        self.del_person_btn.setEnabled(bool(picked))
 
     # ---------- 열기 / 분석 ----------
     def open_dialog(self):
@@ -226,6 +305,7 @@ class MainWindow(QMainWindow):
         self.source = FrameSource(info)
         self.project = None
         self.selected = None
+        self.sel_track = None
         self.n_frames, self.fps = max(1, info.n_frames), info.fps
         self.frame = 0
         self.timeline.mark_in = self.timeline.mark_out = None
@@ -265,7 +345,11 @@ class MainWindow(QMainWindow):
 
     def _set_project(self, project: Project):
         self.project = project
-        self.per = project.boxes_by_frame()
+        self.sel_track = None
+        self._undo.clear()
+        self._redo.clear()
+        self._last_state = project.edit_state()
+        self._update_review()
         self.n_frames, self.fps = project.n_frames, project.video.fps
         if self.source:
             self.source.set_pts(project.pts)
@@ -317,7 +401,7 @@ class MainWindow(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, ALL)
         self.persons.addItem(item)
         for pid, person in sorted(p.persons.items()):
-            secs = sum(len(p.tracks[t].frames) for t in person.tracks) / p.video.fps
+            secs = len(p.person_frames(pid)) / p.video.fps
             eff = effect_text(person.effect) if person.effect else f"기본 ({effect_text(p.default_effect)})"
             extra = f" · 구간 {len(person.segments)}" if person.segments else ""
             warn = "  ⚠ 확인 필요" if p.needs_review(pid) else ""
@@ -336,11 +420,16 @@ class MainWindow(QMainWindow):
                 break
 
     def _on_person_selected(self, item, _prev=None):
-        if item is None or not self.project:
+        if not self.project:
+            return
+        if item is None:
+            self.persons.setCurrentRow(0)
             return
         pid = item.data(Qt.ItemDataRole.UserRole)
         self.selected = pid
         p = self.project
+        if self.sel_track in p.tracks and p.tracks[self.sel_track].person != pid and pid != ALL:
+            self.sel_track = None
         if pid == ALL:
             self.base_picker.allow_inherit = False
             self.base_picker.kind.model().item(0).setEnabled(False)
@@ -354,12 +443,13 @@ class MainWindow(QMainWindow):
             person = p.persons[pid]
             self.base_picker.set_effect(person.effect)
             self.name_edit.setText(person.name)
-            frames = sorted(f for t in person.tracks for f in p.tracks[t].frames)
+            frames = p.person_frames(pid)
             self.info_label.setText(
                 f"등장 {len(frames) / p.video.fps:.1f}초 · 트랙 {len(person.tracks)}개"
                 + (" · ⚠ 점수가 낮거나 아주 짧게 나와서 얼굴이 아닐 수 있습니다." if p.needs_review(pid) else ""))
             self.timeline.set_person(self._runs(frames), person.segments)
             self._fill_segments(person.segments)
+        self._fill_assign()
         self._update_enabled()
         self.refresh_frame()
 
@@ -394,14 +484,41 @@ class MainWindow(QMainWindow):
             shutil.copy2(src, dst)
         return {"type": "image", "value": str(dst)}
 
-    def _changed(self):
+    def _changed(self, track_changed: bool = False):
+        """모든 수정 뒤에 부른다: 실행 취소 기록 → 저장 → 화면 갱신."""
+        if self._last_state is not None:
+            self._undo.append(self._last_state)
+            del self._undo[:-UNDO_LIMIT]
+        self._redo.clear()
+        self._last_state = self.project.edit_state()
+        self._after_edit(track_changed)
+
+    def _after_edit(self, track_changed: bool = True):
         self.project.save()
+        if track_changed:
+            self._update_review()
+        if self.selected not in (None, ALL) and self.selected not in self.project.persons:
+            self.selected = ALL
+        if self.sel_track is not None and self.sel_track not in self.project.tracks:
+            self.sel_track = None
         self._fill_persons()
-        if self.selected not in (None, ALL):
-            person = self.project.persons[self.selected]
-            self.timeline.set_person(self.timeline.presence, person.segments)
-            self._fill_segments(person.segments)
-        self.refresh_frame()
+        self._on_person_selected(self.persons.currentItem())
+
+    def undo(self):
+        self._step_history(self._undo, self._redo, "실행 취소")
+
+    def redo(self):
+        self._step_history(self._redo, self._undo, "다시 실행")
+
+    def _step_history(self, src: list, dst: list, what: str):
+        if not self.project or not src:
+            return
+        dst.append(self.project.edit_state())
+        state = src.pop()
+        self.project.restore_state(state)
+        self._last_state = self.project.edit_state()
+        self._after_edit()
+        self.status_label.setText(what)
 
     def _on_base_effect(self):
         if not self.project or self.selected is None:
@@ -462,6 +579,154 @@ class MainWindow(QMainWindow):
         if self.selected not in (None, ALL):
             self.seek(self.project.persons[self.selected].segments[row]["start"])
 
+    # ---------- 상자 수정 ----------
+    def _picked_persons(self) -> list[int]:
+        return sorted(pid for it in self.persons.selectedItems()
+                      if (pid := it.data(Qt.ItemDataRole.UserRole)) not in (None, ALL))
+
+    def _select_person(self, pid: int):
+        for i in range(self.persons.count()):
+            if self.persons.item(i).data(Qt.ItemDataRole.UserRole) == pid:
+                self.persons.setCurrentRow(i)
+                return
+
+    def _fill_assign(self):
+        self.assign_combo.clear()
+        p = self.project
+        cur = p.tracks[self.sel_track].person if self.sel_track in p.tracks else None
+        for pid, person in sorted(p.persons.items()):
+            if pid != cur:
+                self.assign_combo.addItem(f"#{pid} {person.name}", pid)
+        self.assign_combo.addItem("새 인물", None)
+        if self.sel_track in p.tracks:
+            t = p.tracks[self.sel_track]
+            kind = "직접 그림" if t.auto is None else "자동"
+            edits = f" · 손댄 프레임 {len(t.keys)}" if t.keys else ""
+            self.track_label.setText(f"인물 #{t.person} · 상자 {self.sel_track} ({kind}){edits}")
+        else:
+            self.track_label.setText("선택한 상자 없음 — 미리보기에서 상자를 클릭하세요")
+
+    def _save_face(self, pid: int, box: list[float]):
+        """새로 생긴 인물의 목록용 얼굴 사진 (현재 프레임에서)."""
+        img = self.source.read(self.frame) if self.source else None
+        if img is None:
+            return
+        k = self.source.scale
+        faces = self.project.dir / "faces"
+        faces.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(faces / f"{pid}.jpg"), face_crop(img, [x * k for x in box[:4]]))
+
+    def _on_box_clicked(self, tid):
+        self.sel_track = tid
+        if tid is not None and tid in self.project.tracks:
+            pid = self.project.tracks[tid].person
+            if pid != self.selected:
+                self._select_person(pid)  # 인물 패널도 그 사람으로
+                return
+        self._fill_assign()
+        self._update_enabled()
+        self.refresh_frame()
+
+    def _on_box_changed(self, tid: int, area: list):
+        self.project.set_key(tid, self.frame, shrink(area))
+        self._changed(track_changed=True)
+
+    def _on_box_drawn(self, area: list):
+        """빈 곳에 그린 상자: 이어 그리는 중인 상자가 있으면 거기에 키프레임 추가, 아니면 새 상자."""
+        p, box = self.project, shrink(area)
+        t = p.tracks.get(self.sel_track) if self.sel_track is not None else None
+        if t is not None and t.auto is None and self.frame not in p.track_boxes(self.sel_track):
+            p.set_key(self.sel_track, self.frame, box)
+            self.status_label.setText("상자를 이어 그렸습니다 (사이 프레임은 자동으로 채움)")
+        else:
+            # 고른 인물이 이 프레임에 없으면 그 사람의 놓친 얼굴로, 아니면 새 인물
+            pid = self.selected if self.selected not in (None, ALL) else None
+            if pid is not None and any(p.tracks[tid].person == pid for tid, _b, _s in p.boxes_by_frame().get(self.frame, [])):
+                pid = None
+            self.sel_track = p.add_manual_track(self.frame, box, pid)
+            new_pid = p.tracks[self.sel_track].person
+            if new_pid != pid:
+                self._save_face(new_pid, box)
+            self.selected = new_pid
+            self.status_label.setText("상자를 추가했습니다 · 다른 프레임으로 가서 빈 곳을 끌면 이어 그립니다")
+        self._changed(track_changed=True)
+
+    def _track_edit(self, action: str):
+        p, tid = self.project, self.sel_track
+        if not p or tid is None or tid not in p.tracks:
+            return
+        if action == "frame":
+            p.remove_range(tid, self.frame, self.frame + 1)
+        elif action == "range":
+            a, b = self.timeline.mark_in, self.timeline.mark_out
+            if a is None or b is None:
+                QMessageBox.information(self, "구간 지우기", "시작(I)과 끝(O) 위치를 먼저 정해 주세요.")
+                return
+            p.remove_range(tid, min(a, b), max(a, b) + 1)
+        elif action == "track":
+            p.remove_track(tid)
+            self.sel_track = None
+        elif action == "split":
+            boxes = p.track_boxes(tid)
+            if self.frame <= min(boxes, default=self.frame):
+                self.status_label.setText("상자가 시작되는 프레임에서는 나눌 수 없습니다. 바뀌는 프레임으로 이동하세요.")
+                return
+            new = p.split_track(tid, self.frame)
+            self._assign(new, None)
+            self.sel_track = new
+        elif action == "reset":
+            p.clear_key(tid)
+        elif action == "assign":
+            self._assign(tid, self.assign_combo.currentData())
+        self._changed(track_changed=True)
+
+    def _assign(self, tid: int, pid: int | None):
+        p = self.project
+        new_pid = p.assign_track(tid, pid)
+        if pid is None:
+            boxes = p.track_boxes(tid)
+            f = self.frame if self.frame in boxes else min(boxes, default=None)
+            if f is not None and f == self.frame:
+                self._save_face(new_pid, boxes[f][0])
+        self.selected = new_pid
+
+    def merge_selected(self):
+        pids = self._picked_persons()
+        if len(pids) < 2:
+            return
+        self.project.merge_persons(pids[0], pids[1:])
+        self.selected = pids[0]
+        self.status_label.setText(f"인물 {len(pids)}명을 #{pids[0]}로 합쳤습니다")
+        self._changed(track_changed=True)
+
+    def delete_selected_persons(self):
+        pids = self._picked_persons()
+        if not pids:
+            return
+        for pid in pids:
+            self.project.remove_person(pid)
+        self.selected = ALL
+        self.status_label.setText(f"인물 {len(pids)}명을 지웠습니다 (⌘Z로 되돌리기)")
+        self._changed(track_changed=True)
+
+    # ---------- 확인 지점 ----------
+    def _update_review(self):
+        self.review = self.project.review_points() if self.project else []
+        self.timeline.review = [f for f, _ in self.review]
+        self.timeline.update()
+
+    def next_review(self):
+        if not self.review:
+            return
+        nxt = next(((f, why) for f, why in self.review if f > self.frame), self.review[0])
+        self.pause()
+        if not self.act_boxes.isChecked():
+            self.act_boxes.setChecked(True)
+            self._toggle_boxes(True)
+        self.seek(nxt[0])
+        i = self.review.index(nxt) + 1
+        self.status_label.setText(f"확인 지점 {i}/{len(self.review)}: {nxt[1]}")
+
     # ---------- 재생 / 미리보기 ----------
     def _time(self, f: int) -> float:
         return self.project.time_of(f) if self.project else f / self.fps
@@ -482,7 +747,11 @@ class MainWindow(QMainWindow):
             return
         img = img.copy()
         if self.project:
-            compose(img, self.frame, self.project, self.per, scale=self.source.scale, debug=self.show_boxes)
+            per = self.project.boxes_by_frame()
+            compose(img, self.frame, self.project, per, scale=self.source.scale)
+            self.view.video_size = (self.project.video.width, self.project.video.height)
+            self.view.set_boxes([(tid, f"#{self.project.tracks[tid].person}", grow(b), src)
+                                 for tid, b, src in per.get(self.frame, [])], self.sel_track)
         self.view.set_image(img)
         self.timeline.set_pos(self.frame)
         self.time_label.setText(f"{fmt_time(self._time(self.frame))} / {fmt_time(self._time(self.n_frames - 1))}"
@@ -513,7 +782,8 @@ class MainWindow(QMainWindow):
             self.refresh_frame()
 
     def _toggle_boxes(self, on: bool):
-        self.show_boxes = on
+        self.view.edit = on
+        self.view.unsetCursor()
         self.refresh_frame()
 
     # ---------- 내보내기 ----------
