@@ -159,3 +159,52 @@ def test_sticker_gaps_are_blurred_not_original():
     corner = (slice(185, 199), slice(101, 115))
     assert not np.array_equal(img[corner], before[corner])
     assert img[corner].std() < before[corner].std() / 2
+
+
+def _noise(dtype=np.uint8, hi=255):
+    return (np.random.default_rng(2).random((300, 300, 3)) * hi).astype(dtype)
+
+
+@pytest.mark.parametrize("dtype,hi", [(np.uint8, 255), (np.uint16, 65535)])
+def test_ellipse_keeps_corners_and_covers_center(dtype, hi):
+    img = _noise(dtype, hi)
+    before = img.copy()
+    apply(img, [100, 100, 200, 200], parse_effect("solid:#ff0000,shape=ellipse"))
+    assert np.array_equal(img[101, 101], before[101, 101])  # 모서리는 원본
+    assert img[150, 150].tolist() == [0, 0, hi]  # 가운데는 빨강(BGR)
+
+
+def test_feather_fades_outside_but_fully_covers_box():
+    img = _noise()
+    before = img.copy()
+    apply(img, [100, 100, 200, 200], parse_effect("solid:#ff0000,feather=20"))
+    red = (img == [0, 0, 255]).all(axis=2)
+    assert red[100:200, 100:200].all()  # 원래 영역은 빠짐없이 완전히 덮임
+    edge = img[150, 210].astype(int)  # 바깥 20px: 반쯤 섞임
+    assert not np.array_equal(edge, before[150, 210]) and not red[150, 210]
+    assert np.array_equal(img[150, 250], before[150, 250])  # 2f(=40px) 밖은 원본
+
+
+def test_scale_option_grows_cover_area():
+    from blurface.effects import cover_box
+    a = cover_box([100, 100, 200, 200])
+    b = cover_box([100, 100, 200, 200], {"scale": 150})
+    assert (b[2] - b[0]) == pytest.approx((a[2] - a[0]) * 1.5)
+    assert (b[0] + b[2]) / 2 == pytest.approx((a[0] + a[2]) / 2)
+
+
+def test_box_outside_frame_keeps_shape():
+    img = np.zeros((100, 100, 3), np.uint8)
+    apply(img, [-50, 20, 50, 80], parse_effect("solid:#ffffff,shape=ellipse"))
+    assert img[50, 0].any()  # 화면 밖으로 나간 타원도 안쪽 부분은 칠해짐
+    assert not img[21, 49].any()  # 타원 바깥 모서리
+
+
+def test_parse_effect_options():
+    e = parse_effect("blur:40,shape=rounded,feather=15,scale=130")
+    assert e == {"type": "blur", "value": 40.0, "shape": "rounded", "feather": 15.0, "scale": 130.0}
+    assert parse_effect("mosaic,scale=999")["scale"] == 300
+    with pytest.raises(ValueError):
+        parse_effect("blur,shape=star")
+    from blurface.project import effect_label
+    assert parse_effect(effect_label(e)) == e

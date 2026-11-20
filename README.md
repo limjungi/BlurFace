@@ -4,7 +4,7 @@
 
 ## 기능
 - 얼굴 자동 검출·추적 (컷 전환, 같은 인물 재등장 대응)
-- 인물마다 다른 효과: 모자이크, 블러, 단색, 스티커, 직접 올린 이미지
+- 인물마다 다른 효과: 모자이크, 블러, 단색, 스티커, 직접 올린 이미지 (강도·모양·가장자리·범위 조절)
 - 같은 인물도 시간 구간마다 다른 효과
 - 추적이 틀린 부분 수동 수정: 상자 추가·이동·크기 조절·지우기, 인물 합치기·나누기, 실행 취소
 - 원본 화질·오디오 유지한 채 내보내기 (최대 4K, 10bit HDR, 세로 영상)
@@ -23,6 +23,8 @@ uv run blurface render 영상.mp4 --person-at 0@12-20=sticker:heart   # 인물 0
 몇 프레임 건너 한 번 더 그리면 사이는 자동으로 이어집니다. `N`은 확인이 필요한 다음 위치로 이동, `⌘Z`는 실행 취소입니다.
 
 효과: `mosaic[:블록수]` `blur[:강도]` `solid[:#색]` `sticker[:smile|heart]` `image:파일.png` `none`
+옵션(쉼표로 이어 붙임): `shape=rect|rounded|ellipse` 모양, `feather=0~50` 가장자리 부드럽게, `scale=50~300` 가리는 범위(%)
+예: `--person 2=blur:40,shape=ellipse,feather=20`
 
 ## 스택
 Python 3.12 · PyAV/FFmpeg(VideoToolbox) · ONNX Runtime(CoreML) · SCRFD · ArcFace · PySide6

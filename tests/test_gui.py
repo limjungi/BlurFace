@@ -22,6 +22,8 @@ def app():
 @pytest.mark.parametrize("effect", [
     {"type": "mosaic", "value": 12.0}, {"type": "blur", "value": 45.0}, {"type": "solid", "value": "#ff0000"},
     {"type": "sticker", "value": "heart"}, {"type": "none", "value": None},
+    {"type": "blur", "value": 60.0, "shape": "ellipse", "feather": 20.0, "scale": 130.0},
+    {"type": "mosaic", "value": 10.0, "shape": "rounded"}, {"type": "sticker", "value": "smile", "scale": 80.0},
 ])
 def test_effect_picker_roundtrip(app, effect):
     p = EffectPicker()

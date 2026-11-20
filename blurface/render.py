@@ -11,7 +11,7 @@ import av
 import cv2
 import numpy as np
 
-from .effects import apply, expand_box
+from .effects import apply, clip_box, cover_box
 from .project import Project
 from .video import color_tags, iter_frames, video_time_base
 
@@ -24,9 +24,11 @@ def compose(img: np.ndarray, frame: int, p: Project, per: dict, scale: float = 1
     hi = 65535 if img.dtype == np.uint16 else 255
     for tid, b, src in per.get(frame, []):
         pid = p.tracks[tid].person
-        box = expand_box([x * scale for x in b[:4]], w, h)
-        apply(img, box, p.effect_for(pid, frame))
+        effect = p.effect_for(pid, frame)
+        area = cover_box([x * scale for x in b[:4]], effect)
+        apply(img, area, effect)
         if debug:
+            box = clip_box(area, w, h)
             color = tuple(c * hi for c in SOURCE_COLORS[src])
             cv2.rectangle(img, box[:2], box[2:], color, max(1, int(3 * scale)))
             cv2.putText(img, f"#{pid}", (box[0], max(20, box[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
