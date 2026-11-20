@@ -6,7 +6,7 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QColorDialog, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QSpinBox, QStackedWidget, QWidget)
+                               QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 
 
@@ -15,6 +15,8 @@ EFFECT_CHOICES = [("모자이크", "mosaic"), ("블러", "blur"), ("단색", "so
 EFFECT_COLORS = {"mosaic": "#5b8def", "blur": "#7a6ff0", "solid": "#555b66", "sticker": "#f0b429",
                  "image": "#3ebd93", "none": "#e5534b"}
 STICKERS = [("스마일", "smile"), ("하트", "heart")]
+SHAPE_CHOICES = [("사각형", "rect"), ("둥근 사각형", "rounded"), ("타원", "ellipse")]
+SHAPED = ("mosaic", "blur", "solid")  # 모양·가장자리를 고를 수 있는 효과
 
 
 def effect_text(e: dict | None) -> str:
@@ -28,8 +30,15 @@ def effect_text(e: dict | None) -> str:
     if e["type"] == "image" and v:
         return f"{label}·{v.rsplit('/', 1)[-1]}"
     if e["type"] in ("mosaic", "blur", "solid") and v:
-        return f"{label} {int(v) if e['type'] != 'solid' else v}"
-    return label
+        label = f"{label} {int(v) if e['type'] != 'solid' else v}"
+    extra = []
+    if e.get("shape", "rect") != "rect":
+        extra.append(dict((b, a) for a, b in SHAPE_CHOICES)[e["shape"]])
+    if e.get("feather"):
+        extra.append("부드럽게")
+    if e.get("scale", 100) != 100:
+        extra.append(f"{int(e['scale'])}%")
+    return "·".join([label, *extra])
 
 
 BOX_COLORS = {"auto": "#3ebd93", "interp": "#4fc3f7", "manual": "#e05cd6"}
@@ -337,15 +346,39 @@ class EffectPicker(QWidget):
                        ("solid", self.color_btn), ("sticker", self.sticker), ("image", self.image_btn)]:
             self._pages[key] = self.stack.addWidget(w)
 
-        lay = QHBoxLayout(self)
+        # 모양·가장자리·범위
+        self.shape = QComboBox()
+        for label_, v in SHAPE_CHOICES:
+            self.shape.addItem(label_, v)
+        self.shape.setToolTip("가리는 모양")
+        self.feather = QSpinBox(minimum=0, maximum=50, value=0, prefix="가장자리 ", suffix="%")
+        self.feather.setToolTip("가장자리를 부드럽게 흐리는 정도 (0 = 또렷한 경계). 얼굴은 항상 다 덮입니다")
+        self.scale = QSpinBox(minimum=50, maximum=300, value=100, singleStep=10, prefix="범위 ", suffix="%")
+        self.scale.setToolTip("가리는 영역 크기 (100% = 이마·턱까지)")
+        self.options = QWidget()
+        ol = QHBoxLayout(self.options)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.addWidget(self.shape, 1)
+        ol.addWidget(self.feather, 1)
+        ol.addWidget(self.scale, 1)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addWidget(self.kind, 1)
+        top.addWidget(self.stack, 1)
+        lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.kind, 1)
-        lay.addWidget(self.stack, 1)
+        lay.setSpacing(4)
+        lay.addLayout(top)
+        lay.addWidget(self.options)
 
         self.kind.currentIndexChanged.connect(self._on_kind)
         self.blocks.valueChanged.connect(self.changed)
         self.strength.valueChanged.connect(self.changed)
         self.sticker.currentIndexChanged.connect(self.changed)
+        self.shape.currentIndexChanged.connect(self.changed)
+        self.feather.valueChanged.connect(self.changed)
+        self.scale.valueChanged.connect(self.changed)
         self.color_btn.clicked.connect(self._pick_color)
         self.image_btn.clicked.connect(self._pick_image)
         self._on_kind(silent=True)
@@ -353,11 +386,18 @@ class EffectPicker(QWidget):
     def _on_kind(self, *_args, silent: bool = False):
         k = self.kind.currentData()
         self.stack.setCurrentIndex(self._pages.get(k, self._pages["empty"]))
+        self._update_options()
         if k == "image" and not self.image_path and not silent:
             self._pick_image()
             return
         if not silent:
             self.changed.emit()
+
+    def _update_options(self):
+        k = self.kind.currentData()
+        self.options.setVisible(k not in (None, "none"))
+        self.shape.setEnabled(k in SHAPED)
+        self.feather.setEnabled(k in SHAPED)
 
     def _pick_color(self):
         c = QColorDialog.getColor(QColor(self.color), self, "색 선택")
@@ -381,11 +421,19 @@ class EffectPicker(QWidget):
             return None
         value = {"mosaic": float(self.blocks.value()), "blur": float(self.strength.value()), "solid": self.color,
                  "sticker": self.sticker.currentData(), "image": self.image_path, "none": None}[k]
-        return {"type": k, "value": value}
+        e = {"type": k, "value": value}
+        if k in SHAPED and self.shape.currentData() != "rect":
+            e["shape"] = self.shape.currentData()
+        if k in SHAPED and self.feather.value():
+            e["feather"] = float(self.feather.value())
+        if k != "none" and self.scale.value() != 100:
+            e["scale"] = float(self.scale.value())
+        return e
 
     def set_effect(self, e: dict | None):
         self.blockSignals(True)
-        for w in (self.kind, self.blocks, self.strength, self.sticker):
+        widgets = (self.kind, self.blocks, self.strength, self.sticker, self.shape, self.feather, self.scale)
+        for w in widgets:
             w.blockSignals(True)
         if e is None:
             self.kind.setCurrentIndex(0 if self.allow_inherit else self.kind.findData("mosaic"))
@@ -404,8 +452,13 @@ class EffectPicker(QWidget):
             elif e["type"] == "image" and v:
                 self.image_path = v
                 self.image_btn.setText(v.rsplit("/", 1)[-1])
+        e = e or {}
+        self.shape.setCurrentIndex(max(0, self.shape.findData(e.get("shape", "rect"))))
+        self.feather.setValue(int(e.get("feather", 0)))
+        self.scale.setValue(int(e.get("scale", 100)))
         self.stack.setCurrentIndex(self._pages.get(self.kind.currentData(), self._pages["empty"]))
-        for w in (self.kind, self.blocks, self.strength, self.sticker):
+        self._update_options()
+        for w in widgets:
             w.blockSignals(False)
         self.blockSignals(False)
 

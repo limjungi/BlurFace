@@ -25,10 +25,27 @@ def shrink(box) -> list[float]:
     return [x1 + bw * PAD_X, y1 + bh * PAD_TOP, x2 - bw * PAD_X, y2 - bh * PAD_BOTTOM]
 
 
+SHAPES = ("rect", "rounded", "ellipse")
+
+
+def clip_box(box, w: int, h: int):
+    x1, y1, x2, y2 = box[:4]
+    return max(0, int(x1)), max(0, int(y1)), min(w, int(x2)), min(h, int(y2))
+
+
 def expand_box(box, w: int, h: int):
     """grow 후 화면 안으로 자른 정수 상자."""
+    return clip_box(grow(box), w, h)
+
+
+def cover_box(box, effect: dict | None = None) -> list[float]:
+    """효과의 '범위'(scale, %)까지 반영한 가릴 영역. 화면 밖으로 나갈 수 있음 (모양을 유지하려고 자르지 않음)."""
     x1, y1, x2, y2 = grow(box)
-    return max(0, int(x1)), max(0, int(y1)), min(w, int(x2)), min(h, int(y2))
+    s = (effect or {}).get("scale", 100) / 100
+    if s != 1:
+        cx, cy, hw, hh = (x1 + x2) / 2, (y1 + y2) / 2, (x2 - x1) * s / 2, (y2 - y1) * s / 2
+        x1, y1, x2, y2 = cx - hw, cy - hh, cx + hw, cy + hh
+    return [x1, y1, x2, y2]
 
 
 def _max(img: np.ndarray) -> int:
@@ -114,19 +131,72 @@ def overlay(img, box, rgba: np.ndarray):
     img[b:d, a:c] = (color * alpha + roi * (1 - alpha)).astype(img.dtype)
 
 
-def apply(img: np.ndarray, box, effect: dict):
-    """box는 expand_box를 거친 정수 상자."""
-    x1, y1, x2, y2 = box
-    if x2 - x1 < 2 or y2 - y1 < 2:
-        return
-    kind, value = effect["type"], effect.get("value")
+def _fill(img, box, kind: str, value):
     if kind == "mosaic":
         mosaic(img, box, value or 8)
     elif kind == "blur":
         blur(img, box, value or 30)
     elif kind == "solid":
         solid(img, box, value or "#000000")
-    elif kind in ("sticker", "image"):
+
+
+def _draw_shape(mask: np.ndarray, box, shape: str):
+    x1, y1, x2, y2 = box
+    if shape == "ellipse":
+        cv2.ellipse(mask, ((x1 + x2) // 2, (y1 + y2) // 2), (max(1, (x2 - x1) // 2), max(1, (y2 - y1) // 2)),
+                    0, 0, 360, 255, -1, cv2.LINE_AA)
+    elif shape == "rounded":
+        r = max(1, min(x2 - x1, y2 - y1) // 4)
+        cv2.rectangle(mask, (x1 + r, y1), (x2 - r, y2), 255, -1)
+        cv2.rectangle(mask, (x1, y1 + r), (x2, y2 - r), 255, -1)
+        for cx, cy in ((x1 + r, y1 + r), (x2 - r, y1 + r), (x1 + r, y2 - r), (x2 - r, y2 - r)):
+            cv2.circle(mask, (cx, cy), r, 255, -1, cv2.LINE_AA)
+    else:
+        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+
+def apply(img: np.ndarray, box, effect: dict):
+    """box는 가릴 영역 (화면 밖으로 나가도 됨).
+
+    effect 추가 옵션: shape(rect|rounded|ellipse), feather(가장자리 부드럽게, 상자 짧은 변의 %), scale(범위 %, cover_box에서 반영)
+    """
+    h, w = img.shape[:2]
+    full = [int(round(v)) for v in box[:4]]
+    c = clip_box(full, w, h)
+    if c[2] - c[0] < 2 or c[3] - c[1] < 2:
+        return
+    kind, value = effect["type"], effect.get("value")
+    if kind == "none":
+        return
+    if kind in ("sticker", "image"):
         # 스티커의 투명한 틈(하트 모양 바깥 등)으로 얼굴이 보이지 않도록 먼저 강하게 흐린 뒤 얹는다
-        blur(img, box, 60)
-        overlay(img, box, builtin_sticker(value or "smile") if kind == "sticker" else load_image(value))
+        blur(img, c, 60)
+        overlay(img, full, builtin_sticker(value or "smile") if kind == "sticker" else load_image(value))
+        return
+    shape = effect.get("shape", "rect")
+    f = int(min(full[2] - full[0], full[3] - full[1]) * effect.get("feather", 0) / 100)
+    if shape == "rect" and f == 0:
+        _fill(img, c, kind, value)
+        return
+    # 모양·부드러운 가장자리: 넓힌 영역 전체에 효과를 낸 뒤 모양 마스크로 원본과 섞는다.
+    # 가장자리를 흐려도 원래 영역은 빠짐없이 덮도록 모양을 f만큼 키우고 바깥쪽으로 2f에 걸쳐 흐려지게 한다.
+    x1, y1, x2, y2 = region = clip_box([full[0] - 2 * f, full[1] - 2 * f, full[2] + 2 * f, full[3] + 2 * f], w, h)
+    orig = img[y1:y2, x1:x2].copy()
+    # 넓힌 영역에서도 블록 크기·흐림 정도가 원래 영역 기준과 같도록 보정
+    k = max(x2 - x1, y2 - y1) / max(1, full[2] - full[0], full[3] - full[1])
+    if kind == "mosaic":
+        value = (value or 8) * k
+    elif kind == "blur":
+        value = (value or 30) / k
+    _fill(img, region, kind, value)
+    mask = np.zeros((y2 - y1, x2 - x1), np.uint8)
+    _draw_shape(mask, [full[0] - f - x1, full[1] - f - y1, full[2] + f - x1, full[3] + f - y1], shape)
+    if f:
+        mask = cv2.blur(mask, (2 * f + 1, 2 * f + 1))
+    roi = img[y1:y2, x1:x2]
+    m = mask.astype(np.float32) / 255
+    if img.dtype == np.uint8:  # 8bit는 OpenCV로 섞는 게 몇 배 빠름
+        roi[:] = cv2.blendLinear(roi, orig, m, 1 - m)
+    else:
+        m = m[..., None]
+        roi[:] = np.rint(roi.astype(np.float32) * m + orig.astype(np.float32) * (1 - m)).astype(img.dtype)

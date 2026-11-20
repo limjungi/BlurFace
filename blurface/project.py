@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .effects import SHAPES
 from .video import VideoInfo
 
 VERSION = 3  # 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
@@ -25,12 +26,39 @@ EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
 DEFAULT_EFFECT = {"type": "mosaic", "value": 8}
 
 
+OPTION_KEYS = ("shape", "feather", "scale")
+
+
 def parse_effect(spec: str) -> dict:
-    """'mosaic', 'mosaic:12', 'blur:30', 'solid:#000000', 'sticker:smile', 'image:경로.png', 'none'"""
-    kind, _, value = spec.partition(":")
-    kind = kind.strip().lower()
+    """'mosaic', 'mosaic:12', 'blur:30', 'solid:#000000', 'sticker:smile', 'image:경로.png', 'none'
+
+    뒤에 쉼표로 옵션: 'blur:30,shape=ellipse,feather=20,scale=120'
+    (shape: rect|rounded|ellipse, feather: 가장자리 부드럽게 0~50, scale: 가리는 범위 50~300%)
+    """
+    head = spec.split(":", 1)[0].split(",", 1)[0]  # 'mosaic,scale=120'처럼 값 없이 옵션만 줘도 됨
+    rest = spec[len(head):].removeprefix(":")
+    kind = head.strip().lower()
     if kind not in EFFECT_TYPES:
         raise ValueError(f"알 수 없는 효과: {kind} (가능: {', '.join(EFFECT_TYPES)})")
+    parts = rest.split(",") if rest else [""]
+    opts: dict = {}
+    while parts and parts[-1].split("=", 1)[0].strip() in OPTION_KEYS and "=" in parts[-1]:
+        k, v = parts.pop().split("=", 1)
+        opts[k.strip()] = v.strip()
+    value = ",".join(parts)
+    e = _parse_value(kind, value)
+    if "shape" in opts:
+        if opts["shape"] not in SHAPES:
+            raise ValueError(f"알 수 없는 모양: {opts['shape']} (가능: {', '.join(SHAPES)})")
+        e["shape"] = opts["shape"]
+    if "feather" in opts:
+        e["feather"] = min(50.0, max(0.0, float(opts["feather"])))
+    if "scale" in opts:
+        e["scale"] = min(300.0, max(50.0, float(opts["scale"])))
+    return e
+
+
+def _parse_value(kind: str, value: str) -> dict:
     if kind in ("mosaic", "blur"):
         return {"type": kind, "value": float(value) if value else (8 if kind == "mosaic" else 30)}
     if kind == "solid":
@@ -45,7 +73,8 @@ def parse_effect(spec: str) -> dict:
 
 
 def effect_label(e: dict) -> str:
-    return e["type"] if e.get("value") in (None, "") else f"{e['type']}:{e['value']}"
+    s = e["type"] if e.get("value") in (None, "") else f"{e['type']}:{e['value']}"
+    return s + "".join(f",{k}={e[k]}" for k in OPTION_KEYS if k in e)
 
 
 @dataclass
