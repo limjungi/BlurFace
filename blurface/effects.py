@@ -8,12 +8,27 @@ import cv2
 import numpy as np
 
 
-def expand_box(box, w: int, h: int, pad_x: float = 0.15, pad_top: float = 0.3, pad_bottom: float = 0.1):
-    """검출 상자는 얼굴만 딱 맞으므로 이마·머리·턱까지 덮게 넓힌다."""
+PAD_X, PAD_TOP, PAD_BOTTOM = 0.15, 0.3, 0.1
+
+
+def grow(box) -> list[float]:
+    """검출 상자는 얼굴만 딱 맞으므로 이마·머리·턱까지 덮게 넓힌다 (실제로 가려지는 영역)."""
     x1, y1, x2, y2 = box[:4]
     bw, bh = x2 - x1, y2 - y1
-    return (max(0, int(x1 - bw * pad_x)), max(0, int(y1 - bh * pad_top)),
-            min(w, int(x2 + bw * pad_x)), min(h, int(y2 + bh * pad_bottom)))
+    return [x1 - bw * PAD_X, y1 - bh * PAD_TOP, x2 + bw * PAD_X, y2 + bh * PAD_BOTTOM]
+
+
+def shrink(box) -> list[float]:
+    """grow의 역: 화면에서 그린 '가릴 영역'을 저장용 얼굴 상자로 바꾼다."""
+    x1, y1, x2, y2 = box[:4]
+    bw, bh = (x2 - x1) / (1 + 2 * PAD_X), (y2 - y1) / (1 + PAD_TOP + PAD_BOTTOM)
+    return [x1 + bw * PAD_X, y1 + bh * PAD_TOP, x2 - bw * PAD_X, y2 - bh * PAD_BOTTOM]
+
+
+def expand_box(box, w: int, h: int):
+    """grow 후 화면 안으로 자른 정수 상자."""
+    x1, y1, x2, y2 = grow(box)
+    return max(0, int(x1)), max(0, int(y1)), min(w, int(x2)), min(h, int(y2))
 
 
 def _max(img: np.ndarray) -> int:

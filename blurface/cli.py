@@ -86,7 +86,7 @@ def _apply_effect_options(p: Project, args) -> bool:
 def _print_persons(p: Project):
     print(f"인물 {len(p.persons)}명  (기본 효과: {effect_label(p.default_effect)})")
     for pid, person in sorted(p.persons.items()):
-        secs = sum(len(p.tracks[t].frames) for t in person.tracks) / p.video.fps
+        secs = len(p.person_frames(pid)) / p.video.fps
         mark = "" if person.effect else " (기본)"
         warn = "  ⚠ 확인 필요" if p.needs_review(pid) else ""
         print(f"  #{pid:<3} {secs:6.1f}초  트랙 {len(person.tracks):<3} {effect_label(p.effect_for(pid))}{mark}{warn}")

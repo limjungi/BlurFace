@@ -5,7 +5,7 @@ from blurface.analyze import fill_and_smooth
 from blurface.cuts import find_cuts
 from blurface.effects import apply, expand_box
 from blurface.persons import cluster_tracks
-from blurface.project import Person, Project, Track, parse_effect
+from blurface.project import AutoTrack, Person, Project, Track, parse_effect
 from blurface.track import Tracker
 from blurface.video import VideoInfo
 
@@ -98,12 +98,16 @@ def test_project_save_load_roundtrip(tmp_path):
     video = tmp_path / "v.mp4"
     video.write_bytes(b"")
     info = VideoInfo(str(video), 1920, 1080, 30.0, "30/1", 10, 0, False, "h264", 0, {}, True)
-    p = Project(info, 10, [5], {0: Track(0, [1, 2], [[1, 2, 3, 4, 0.9], [2, 3, 4, 5, 0.8]], ["auto", "interp"])},
-                {0: Person("인물 0", [0], [1, 1, 2, 3, 4], parse_effect("blur:20"))})
+    p = Project(info, 10, [5], {0: Track(0, auto=0)}, {0: Person("인물 0", [0], [1, 1, 2, 3, 4], parse_effect("blur:20"))},
+                auto={0: AutoTrack([1, 2], [[1, 2, 3, 4, 0.9], [2, 3, 4, 5, 0.8]], ["auto", "interp"])})
+    p.set_key(0, 2, [5, 5, 9, 9])
+    p.remove_range(0, 8, 9)
     p.save()
     q = Project.load(video)
     assert q.cuts == [5]
-    assert q.tracks[0].sources == ["auto", "interp"]
+    assert q.auto[0].sources == ["auto", "interp"]
+    assert q.tracks[0].keys == {2: [5, 5, 9, 9]} and q.tracks[0].removed == [[8, 9]]
+    assert q.track_boxes(0)[2] == ([5, 5, 9, 9, 1.0], "manual")
     assert q.persons[0].effect == {"type": "blur", "value": 20.0}
     assert q.effect_for(0)["type"] == "blur"
 
