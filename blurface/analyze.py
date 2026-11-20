@@ -14,7 +14,7 @@ from .cuts import differences, find_cuts, signature
 from .detect.scrfd import SCRFD
 from .embed import MODELS, ArcFace
 from .persons import cluster_tracks, contact_sheet, face_crop, grab_frames
-from .project import Person, Project, Track, effect_label
+from .project import AutoTrack, Person, Project, Track, effect_label
 from .track import Tracker
 from .video import iter_frames, probe
 
@@ -109,6 +109,7 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
         raw += [(t, lo, hi) for t in tracker.close()]
         next_id = tracker.next_id
 
+    autos: dict[int, AutoTrack] = {}
     tracks: dict[int, Track] = {}
     track_embs: dict[int, np.ndarray | None] = {}
     track_frames: dict[int, set[int]] = {}
@@ -119,7 +120,8 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
         filled = fill_and_smooth(t.observations, max_gap=max_lost, extend=2, lo=lo, hi=hi)
         tid = len(tracks)
         frames = sorted(filled)
-        tracks[tid] = Track(-1, frames, [list(filled[f][:5]) for f in frames], [filled[f][5] for f in frames])
+        autos[tid] = AutoTrack(frames, [list(filled[f][:5]) for f in frames], [filled[f][5] for f in frames])
+        tracks[tid] = Track(-1, auto=tid)
         vecs = [embs[(f, j)] for f, j in t.refs.items() if (f, j) in embs]
         if vecs:
             v = np.mean(vecs, axis=0)
@@ -137,14 +139,15 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
     for pid, p in persons.items():
         # 대표 얼굴: 점수 x 크기가 가장 큰 자동 검출 상자
         best = max(((f, b) for tid in p.tracks for f, b, s in
-                    zip(tracks[tid].frames, tracks[tid].boxes, tracks[tid].sources) if s == "auto"),
+                    zip(autos[tid].frames, autos[tid].boxes, autos[tid].sources) if s == "auto"),
                    key=lambda fb: fb[1][4] * (fb[1][2] - fb[1][0]), default=None)
         if best:
             p.thumb = [best[0], *best[1][:4]]
     timings["track_cluster"] = time.perf_counter() - t1
 
     t_first = pts_list[0] if pts_list else 0.0  # 영상 시작을 0초로
-    project = Project(info, n, cuts, tracks, persons, timings=timings, pts=[t - t_first for t in pts_list])
+    project = Project(info, n, cuts, tracks, persons, timings=timings, pts=[t - t_first for t in pts_list],
+                      auto=autos)
     project.timings["total_analyze"] = time.perf_counter() - t0
     project.save()
     write_person_sheet(project)
@@ -165,7 +168,7 @@ def write_person_sheet(project: Project) -> Path:
             continue
         crop = face_crop(frames[int(p.thumb[0])], p.thumb[1:])
         cv2.imwrite(str(faces_dir / f"{pid}.jpg"), crop)
-        secs = sum(len(project.tracks[t].frames) for t in p.tracks) / project.video.fps
+        secs = len(project.person_frames(pid)) / project.video.fps
         title = f"#{pid}  {secs:.1f}s" + ("  ?" if project.needs_review(pid) else "")
         crops.append((title, effect_label(project.effect_for(pid)), crop))
     path = project.dir / "persons.jpg"

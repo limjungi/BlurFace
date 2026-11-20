@@ -1,18 +1,25 @@
-"""프로젝트 파일: 분석 결과(트랙·인물)와 사용자 설정(인물별 효과)을 저장한다.
+"""프로젝트 파일: 분석 결과와 사용자 수정·설정을 저장한다.
 
-영상 옆 `<이름>.blurface/project.json`에 저장. 자동 분석 결과(tracks)와 사용자 설정(persons의 effect/name)을
-분리해 두어, 다시 분석해도 사용자 설정을 이어받을 수 있게 한다.
+영상 옆 `<이름>.blurface/project.json`에 저장.
+- auto: 자동 분석 결과 (바꾸지 않음)
+- tracks: 사람이 고칠 수 있는 트랙. 자동 결과를 가리키고(auto, span) 그 위에 수동 키프레임(keys)과 지운 구간(removed)을 얹는다
+- persons: 인물 이름·효과·구간 효과
+실제로 가릴 상자는 track_boxes()가 이 셋을 합쳐 계산한다.
 """
 
 from __future__ import annotations
 
+import bisect
+import copy
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from .video import VideoInfo
 
-VERSION = 2  # 2: 프레임 시각(pts), 구간 효과 추가
+VERSION = 3  # 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
 DEFAULT_EFFECT = {"type": "mosaic", "value": 8}
@@ -42,11 +49,21 @@ def effect_label(e: dict) -> str:
 
 
 @dataclass
-class Track:
-    person: int
+class AutoTrack:
+    """자동 분석 결과 (분석 후 바뀌지 않음)."""
     frames: list[int]
     boxes: list[list[float]]  # [x1, y1, x2, y2, score]
-    sources: list[str]  # auto | interp | manual
+    sources: list[str]  # auto | interp
+
+
+@dataclass
+class Track:
+    """편집 가능한 트랙."""
+    person: int
+    auto: int | None = None  # 자동 결과 번호. None이면 사람이 직접 그린 트랙
+    span: list[int] = field(default_factory=lambda: [0, 1 << 30])  # 이 트랙이 쓰는 자동 결과 범위 [시작, 끝)
+    keys: dict[int, list[float]] = field(default_factory=dict)  # 수동 키프레임 {프레임: [x1, y1, x2, y2]}
+    removed: list[list[int]] = field(default_factory=list)  # 지운 구간 [[시작, 끝), ...]
 
 
 @dataclass
@@ -69,6 +86,11 @@ class Project:
     default_effect: dict = field(default_factory=lambda: dict(DEFAULT_EFFECT))
     timings: dict = field(default_factory=dict)
     pts: list[float] = field(default_factory=list)  # 프레임별 시각(초)
+    auto: dict[int, AutoTrack] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self._cache: dict[int, dict] = {}
+        self._per: dict | None = None
 
     @staticmethod
     def dir_for(video: str | Path) -> Path:
@@ -109,19 +131,216 @@ class Project:
 
     def needs_review(self, pid: int) -> bool:
         """점수가 낮거나 아주 잠깐 나온 인물 (손·뒤통수 같은 오검출이거나 흐린 얼굴일 수 있음)."""
-        n_frames = sum(len(self.tracks[t].frames) for t in self.persons[pid].tracks)
-        if n_frames < self.video.fps * 0.5:
+        boxes = [b for t in self.persons[pid].tracks for b in self.track_boxes(t).values()]
+        if not boxes:
+            return False  # 모두 지운 인물
+        if len(boxes) < self.video.fps * 0.5:
             return True
-        scores = sorted(b[4] for t in self.persons[pid].tracks
-                        for b, s in zip(self.tracks[t].boxes, self.tracks[t].sources) if s == "auto")
-        return not scores or scores[int(len(scores) * 0.75)] < 0.7
+        scores = sorted(b[0][4] for b in boxes if b[1] == "auto")
+        if not scores:
+            return False  # 모두 사람이 그린 상자
+        return scores[int(len(scores) * 0.75)] < 0.7
+
+    def person_frames(self, pid: int) -> list[int]:
+        return sorted({f for t in self.persons[pid].tracks for f in self.track_boxes(t)})
+
+    # ---------- 실제로 가릴 상자 계산 ----------
+    def track_boxes(self, tid: int) -> dict[int, tuple[list[float], str]]:
+        """{프레임: ([x1, y1, x2, y2, score], source)}. source: auto | interp | manual"""
+        if tid in self._cache:
+            return self._cache[tid]
+        t = self.tracks[tid]
+        lo, hi = t.span
+        out: dict[int, tuple[list[float], str]] = {}
+        base: dict[int, list[float]] = {}
+        if t.auto is not None and t.auto in self.auto:
+            a = self.auto[t.auto]
+            i0, i1 = bisect.bisect_left(a.frames, lo), bisect.bisect_left(a.frames, hi)
+            for f, b, s in zip(a.frames[i0:i1], a.boxes[i0:i1], a.sources[i0:i1]):
+                out[f] = (list(b), s)
+                base[f] = b
+        keys = sorted(t.keys.items())
+        if keys:
+            fade = max(1, round(self.video.fps * 0.5))
+            delta = {f: (np.subtract(k, base[f][:4]) if f in base else None) for f, k in keys}
+            for (fa, ka), (fb, kb) in zip(keys, keys[1:]):
+                da, db = delta[fa], delta[fb]
+                for f in range(fa, fb + 1):
+                    w = (f - fa) / (fb - fa)
+                    if f in base and da is not None and db is not None:
+                        # 자동 상자 움직임은 살리고, 사람이 고친 차이만 이어서 적용
+                        box = np.add(base[f][:4], da * (1 - w) + db * w)
+                    else:
+                        box = np.multiply(ka, 1 - w) + np.multiply(kb, w)
+                    out[f] = ([*map(float, box), 1.0], "manual")
+            for f, k in keys:
+                out[f] = ([*map(float, k), 1.0], "manual")
+            # 처음·마지막 키프레임 바깥은 고친 차이를 0.5초에 걸쳐 서서히 없앤다
+            for edge, sign in ((keys[0][0], -1), (keys[-1][0], 1)):
+                d = delta[edge]
+                if d is None:
+                    continue
+                for step in range(1, fade):
+                    f = edge + sign * step
+                    if f in base:
+                        w = 1 - step / fade
+                        out[f] = ([*map(float, np.add(base[f][:4], d * w)), base[f][4]], "manual")
+        for a, b in t.removed:
+            for f in [f for f in out if a <= f < b]:
+                del out[f]
+        self._cache[tid] = out
+        return out
 
     def boxes_by_frame(self) -> dict[int, list[tuple[int, list[float], str]]]:
-        out: dict[int, list] = {}
+        if self._per is None:
+            per: dict[int, list] = {}
+            for tid in self.tracks:
+                for f, (b, s) in self.track_boxes(tid).items():
+                    per.setdefault(f, []).append((tid, b, s))
+            self._per = per
+        return self._per
+
+    def _touch(self, *tids: int):
+        for t in tids:
+            self._cache.pop(t, None)
+        self._per = None
+
+    def _reindex(self, drop_empty: bool = True):
+        """인물별 트랙 목록을 다시 만들고, 트랙이 하나도 없는 인물은 지운다."""
+        for p in self.persons.values():
+            p.tracks = []
+        for tid, t in sorted(self.tracks.items()):
+            if t.person in self.persons:
+                self.persons[t.person].tracks.append(tid)
+        if drop_empty:
+            for pid in [pid for pid, p in self.persons.items() if not p.tracks]:
+                del self.persons[pid]
+
+    # ---------- 수정 ----------
+    def set_key(self, tid: int, frame: int, box: list[float]):
+        self.tracks[tid].keys[frame] = [float(x) for x in box[:4]]
+        self._touch(tid)
+
+    def clear_key(self, tid: int, frame: int | None = None):
+        """frame이 None이면 그 트랙의 키프레임을 모두 지운다 (자동 결과로 되돌리기)."""
+        t = self.tracks[tid]
+        if frame is None:
+            t.keys.clear()
+        else:
+            t.keys.pop(frame, None)
+        self._touch(tid)
+
+    def new_person(self, name: str | None = None, thumb: list[float] | None = None) -> int:
+        pid = max(self.persons, default=-1) + 1
+        self.persons[pid] = Person(name or f"인물 {pid}", [], thumb or [])
+        return pid
+
+    def add_manual_track(self, frame: int, box: list[float], pid: int | None = None) -> int:
+        if pid is None or pid not in self.persons:
+            pid = self.new_person(thumb=[frame, *box[:4]])
+        tid = max(self.tracks, default=-1) + 1
+        self.tracks[tid] = Track(pid, None, [0, 0], {frame: [float(x) for x in box[:4]]})
+        self._reindex()
+        self._touch(tid)
+        return tid
+
+    def remove_range(self, tid: int, start: int, end: int):
+        """[start, end) 구간의 상자를 지운다 (얼굴이 아닌 것을 잡았을 때)."""
+        if end <= start:
+            return
+        rs = sorted([*self.tracks[tid].removed, [start, end]])
+        merged: list[list[int]] = []
+        for a, b in rs:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        self.tracks[tid].removed = merged
+        self._touch(tid)
+
+    def remove_track(self, tid: int):
+        self.remove_range(tid, 0, self.n_frames)
+
+    def remove_person(self, pid: int):
+        """얼굴이 아닌 것(손·뒤통수 등)으로 판단해 인물째 지운다."""
+        for tid in list(self.persons[pid].tracks):
+            self.remove_track(tid)
+            self.tracks[tid].person = -1
+        self._reindex()
+
+    def split_track(self, tid: int, frame: int) -> int:
+        """frame부터 뒤쪽을 새 트랙으로 떼어낸다 (두 사람이 한 트랙에 섞였을 때)."""
+        t = self.tracks[tid]
+        new = max(self.tracks) + 1
+        lo, hi = t.span
+        self.tracks[new] = Track(t.person, t.auto, [max(lo, frame), hi],
+                                 {f: k for f, k in t.keys.items() if f >= frame}, copy.deepcopy(t.removed))
+        t.span = [lo, min(hi, frame)]
+        t.keys = {f: k for f, k in t.keys.items() if f < frame}
+        self._reindex()
+        self._touch(tid, new)
+        return new
+
+    def assign_track(self, tid: int, pid: int | None) -> int:
+        """트랙을 다른 인물로 옮긴다. pid가 None이면 새 인물을 만든다."""
+        if pid is None or pid not in self.persons:
+            frames = self.track_boxes(tid)
+            f = next(iter(sorted(frames)), 0)
+            pid = self.new_person(thumb=[f, *frames[f][0][:4]] if frames else [])
+        self.tracks[tid].person = pid
+        self._reindex()
+        self._touch(tid)
+        return pid
+
+    def merge_persons(self, target: int, others: list[int]):
+        """others의 트랙을 모두 target으로 옮긴다. 이름·효과·구간 효과는 target 것을 쓴다."""
+        for pid in others:
+            if pid == target or pid not in self.persons:
+                continue
+            for tid in self.persons[pid].tracks:
+                self.tracks[tid].person = target
+        self._reindex()
+        self._touch()
+
+    # ---------- 실행 취소용 상태 ----------
+    def edit_state(self) -> dict:
+        return {"persons": copy.deepcopy(self.persons), "tracks": copy.deepcopy(self.tracks),
+                "default_effect": copy.deepcopy(self.default_effect)}
+
+    def restore_state(self, state: dict):
+        self.persons = copy.deepcopy(state["persons"])
+        self.tracks = copy.deepcopy(state["tracks"])
+        self.default_effect = copy.deepcopy(state["default_effect"])
+        self._cache.clear()
+        self._per = None
+
+    # ---------- 검토가 필요한 곳 ----------
+    def review_points(self) -> list[tuple[int, str]]:
+        """자동 추적이 틀렸을 수 있는 위치 (프레임, 이유)."""
+        pts: list[tuple[int, str]] = []
+        min_gap = max(3, round(self.video.fps * 0.2))
         for tid, t in self.tracks.items():
-            for f, b, s in zip(t.frames, t.boxes, t.sources):
-                out.setdefault(f, []).append((tid, b, s))
-        return out
+            boxes = self.track_boxes(tid)
+            if not boxes:
+                continue
+            frames = sorted(boxes)
+            if t.person in self.persons and self.needs_review(t.person):
+                pts.append((frames[0], f"인물 #{t.person} 확인 필요"))
+            run_start, run_kind, run_len = None, None, 0
+            for f in frames + [None]:
+                b = boxes.get(f) if f is not None else None
+                kind = None
+                if b is not None and b[1] == "interp":
+                    kind = "검출이 끊겨 이어 붙인 구간"
+                elif b is not None and b[1] == "auto" and b[0][4] < 0.5:
+                    kind = "검출 점수 낮음"
+                if kind == run_kind and kind is not None and f == run_start + run_len:
+                    run_len += 1
+                    continue
+                if run_kind and run_len >= min_gap:
+                    pts.append((run_start, f"#{t.person} {run_kind}"))
+                run_start, run_kind, run_len = f, kind, 1
+        return sorted(set(pts))
 
     def save(self) -> Path:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -133,9 +352,12 @@ class Project:
             "cuts": self.cuts,
             "default_effect": self.default_effect,
             "persons": {str(k): asdict(v) for k, v in self.persons.items()},
-            "tracks": {str(k): {"person": t.person, "frames": t.frames,
-                                "boxes": [[round(x, 1) for x in b[:4]] + [round(b[4], 3)] for b in t.boxes],
-                                "sources": t.sources} for k, t in self.tracks.items()},
+            "auto": {str(k): {"frames": a.frames,
+                              "boxes": [[round(x, 1) for x in b[:4]] + [round(b[4], 3)] for b in a.boxes],
+                              "sources": a.sources} for k, a in self.auto.items()},
+            "tracks": {str(k): {"person": t.person, "auto": t.auto, "span": t.span,
+                                "keys": {str(f): [round(x, 1) for x in b] for f, b in t.keys.items()},
+                                "removed": t.removed} for k, t in self.tracks.items()},
             "timings": self.timings,
             "pts": [round(x, 6) for x in self.pts],
         }
@@ -148,10 +370,21 @@ class Project:
         if not path.exists():
             return None
         d = json.loads(path.read_text())
-        if d.get("version") != VERSION:
+        if d.get("version") == 2:  # 이전 형식: 트랙 = 자동 결과. 수정 없는 새 형식으로 옮긴다
+            d["auto"] = {k: {"frames": t["frames"], "boxes": t["boxes"], "sources": t["sources"]}
+                         for k, t in d["tracks"].items()}
+            d["tracks"] = {k: {"person": t["person"], "auto": int(k)} for k, t in d["tracks"].items()}
+        elif d.get("version") != VERSION:
             return None
         p = cls(VideoInfo(**d["video"]), d["n_frames"], d["cuts"], default_effect=d["default_effect"],
                 timings=d.get("timings", {}), pts=d.get("pts", []))
         p.persons = {int(k): Person(**v) for k, v in d["persons"].items()}
-        p.tracks = {int(k): Track(**v) for k, v in d["tracks"].items()}
+        p.video.path = str(video)  # 영상을 옮겼거나 상대 경로로 저장됐어도 지금 연 위치를 기준으로
+        p.auto = {int(k): AutoTrack(**v) for k, v in d.get("auto", {}).items()}
+        p.tracks = {}
+        for k, v in d["tracks"].items():
+            v = dict(v)
+            v["keys"] = {int(f): b for f, b in v.get("keys", {}).items()}
+            p.tracks[int(k)] = Track(**v)
+        p._reindex(drop_empty=False)
         return p
