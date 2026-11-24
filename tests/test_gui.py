@@ -350,3 +350,39 @@ def test_speed_and_seekbar(app, opened):
     assert w.speed == 2.0 and w.speed_btns[2.0].isChecked() and not w.speed_btns[1.0].isChecked()
     w.seekbar.seek.emit(300)
     assert w.frame == 300 and w.seekbar.pos == 300
+
+
+def test_menubar_has_menus_and_actions(app, opened):
+    w = opened
+    menus = {a.text(): a.menu() for a in w.menuBar().actions()}
+    assert list(menus)[:5] == ["파일", "편집", "도구", "재생", "보기"]
+    texts = {a.text() for m in menus.values() for a in m.actions()}
+    assert {"열기", "내보내기", "실행 취소", "자르기 도구", "재생 / 일시 정지", "2배속", "전체 화면"} <= texts
+    menus["재생"].actions()[0].trigger()  # 재생 / 일시 정지
+    assert w.play_timer.isActive()
+    w.pause()
+    w.act_speed[0.5].trigger()
+    assert w.speed == 0.5 and w.speed_btns[0.5].isChecked()
+
+
+def test_notify_only_when_not_looking(app, opened, monkeypatch):
+    from blurface.gui import notify as nmod
+    sent = []
+    monkeypatch.setattr(nmod, "notify", lambda t, x, sound=True: sent.append(t))
+    w = opened
+    w.act_notify.setChecked(True)
+    monkeypatch.setattr(w, "isActiveWindow", lambda: True)
+    w._notify("내보내기 완료", "a.mp4")
+    assert sent == []
+    monkeypatch.setattr(w, "isActiveWindow", lambda: False)
+    w._notify("내보내기 완료", "a.mp4")
+    assert sent == ["내보내기 완료"]
+    w.act_notify.setChecked(False)
+    w._notify("내보내기 완료", "a.mp4")
+    assert sent == ["내보내기 완료"]
+    w.act_notify.setChecked(True)
+
+
+def test_notify_quotes():
+    from blurface.gui.notify import _quote
+    assert _quote('a "b" \\c') == '"a \\"b\\" \\\\c"'
