@@ -552,8 +552,17 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, e):
         urls = e.mimeData().urls()
-        if urls:
-            self.open_path(urls[0].toLocalFile())
+        paths = [u.toLocalFile() for u in urls]
+        from .. import library
+        if paths and all(Path(x).suffix.lower() in library.EXTS for x in paths):
+            # 이미지 파일들: 내 이미지 보관함에 한 번에 추가하고, 고른 인물(또는 나머지)에 적용
+            if self.project and self.selected is not None and self.picker.add_images(paths):
+                self.status_label.setText(f"내 이미지 {len(paths)}개를 보관함에 추가했어요")
+            else:
+                self.status_label.setText("이미지를 넣으려면 먼저 영상을 열고 인물을 고르세요")
+            return
+        if paths:
+            self.open_path(paths[0])
 
     def open_video(self, path: str):
         if self.worker:
