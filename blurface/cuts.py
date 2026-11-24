@@ -12,6 +12,9 @@ import numpy as np
 
 
 def signature(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    h, w = bgr.shape[:2]
+    if w % 128 or h % 72:  # 정수 배가 아니면 INTER_AREA가 아주 느려서(정사각·세로 영상) 먼저 정수 배 크기로 맞춤
+        bgr = cv2.resize(bgr, (128 * max(1, w // 128), 72 * max(1, h // 72)), interpolation=cv2.INTER_LINEAR)
     small = cv2.resize(bgr, (128, 72), interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     hs = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256]).ravel()

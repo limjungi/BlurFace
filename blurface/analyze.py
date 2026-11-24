@@ -72,10 +72,12 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
     prev_sig = None
     n = 0
     pts_list: list[float] = []
+    bright: list[float] = []  # 프레임 밝기 (대표 얼굴을 어두운 장면에서 고르지 않게)
     for i, pts, img in iter_frames(info, ANALYSIS_SIDE):
         if cancel and cancel():
             raise InterruptedError("분석 취소됨")
         pts_list.append(pts)
+        bright.append(float(np.mean(img[::8, ::8])))
         sig = signature(img)
         diffs_sigs.append(0.0 if prev_sig is None else differences([prev_sig, sig])[1])
         prev_sig = sig
@@ -137,10 +139,11 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
         persons.setdefault(pid, Person(name=Project.default_name(pid), tracks=[], thumb=[]))
         persons[pid].tracks.append(tid)
     for pid, p in persons.items():
-        # 대표 얼굴: 점수 x 크기가 가장 큰 자동 검출 상자
+        # 대표 얼굴: 점수 x 크기가 큰 자동 검출 상자. 어두운 장면(페이드 등)은 깎아서 밝은 장면을 고른다
         best = max(((f, b) for tid in p.tracks for f, b, s in
                     zip(autos[tid].frames, autos[tid].boxes, autos[tid].sources) if s == "auto"),
-                   key=lambda fb: fb[1][4] * (fb[1][2] - fb[1][0]), default=None)
+                   key=lambda fb: fb[1][4] * (fb[1][2] - fb[1][0]) * min(1.0, bright[fb[0]] / 90) ** 2,
+                   default=None)
         if best:
             p.thumb = [best[0], *best[1][:4]]
     timings["track_cluster"] = time.perf_counter() - t1
