@@ -1351,13 +1351,35 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+class BlurFaceApp(QApplication):
+    """Finder에서 앱 아이콘에 영상을 끌어다 놓거나 '다음으로 열기'로 열 때 받는다 (macOS FileOpen 이벤트)."""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.window: MainWindow | None = None
+        self.pending: str | None = None
+
+    def event(self, e):
+        if e.type() == QEvent.Type.FileOpen:
+            path = e.file()
+            if self.window:
+                self.window.open_video(path)
+            else:
+                self.pending = path
+            return True
+        return super().event(e)
+
+
 def main(argv: list[str] | None = None):
     argv = sys.argv if argv is None else argv
-    app = QApplication(argv)
+    app = BlurFaceApp(argv)
     app.setApplicationName("BlurFace")
     apply_theme(app)
     win = MainWindow()
+    app.window = win
     win.show()
+    if app.pending:
+        QTimer.singleShot(0, lambda: win.open_video(app.pending))
     files = [a for a in argv[1:] if Path(a).exists()]
     if files:
         QTimer.singleShot(0, lambda: win.open_video(files[0]))

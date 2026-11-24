@@ -14,7 +14,7 @@ import numpy as np
 
 from .effects import apply, clip_box, cover_box
 from .project import Project
-from .video import color_tags, iter_frames, video_time_base
+from .video import color_tags, iter_frames, tool, video_time_base
 
 SOURCE_COLORS = {"auto": (0, 1, 0), "interp": (0, 0.8, 1), "manual": (1, 0, 1)}  # BGR 비율
 
@@ -100,7 +100,7 @@ def render(p: Project, out: str | Path, debug: bool = False, progress=None, canc
     out_w, out_h = opts.size(v.width, v.height)
     tb = video_time_base(v)
     # 프레임을 원본 시각(pts)과 함께 NUT 형식으로 넘겨 가변 프레임레이트 영상도 소리와 어긋나지 않게 한다
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "nut", "-i", "-",
+    cmd = [tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-f", "nut", "-i", "-",
            "-i", v.path, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",
            *encoder_args(p, opts), "-fps_mode", "passthrough", "-enc_time_base:v", "demux", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)

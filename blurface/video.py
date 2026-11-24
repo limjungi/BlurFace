@@ -14,6 +14,18 @@ import numpy as np
 ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 
 
+
+TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")  # Finder에서 연 앱은 PATH에 Homebrew가 없음
+
+
+def tool(name: str) -> str:
+    """ffmpeg/ffprobe 실행 파일 경로. 없으면 설치 방법을 알려주는 오류."""
+    import shutil
+    found = shutil.which(name) or next((f"{d}/{name}" for d in TOOL_DIRS if Path(f"{d}/{name}").exists()), None)
+    if not found:
+        raise RuntimeError(f"{name}이(가) 필요합니다. 터미널에서 설치해 주세요:\n  brew install ffmpeg")
+    return found
+
 @dataclass
 class VideoInfo:
     path: str
@@ -33,7 +45,7 @@ class VideoInfo:
 def color_tags(path: str | Path) -> dict:
     """색 정보(HDR 등)를 ffmpeg 옵션 이름 그대로 읽는다. PyAV는 숫자로만 줘서 ffprobe 사용."""
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+        [tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries",
          "stream=color_primaries,color_transfer,color_space", "-of", "json", str(path)],
         capture_output=True, text=True, check=False)
     try:
