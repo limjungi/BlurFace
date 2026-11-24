@@ -46,11 +46,15 @@ def test_runs_groups_consecutive_frames():
 def opened(app, tmp_path):
     """샘플 영상과 분석 결과를 임시 폴더에 복사해 연다 (원본 프로젝트 파일을 건드리지 않게)."""
     import shutil
-    if not (SAMPLE.exists() and (SAMPLE.with_name(SAMPLE.stem + ".blurface") / "project.json").exists()):
+    # 샘플 분석 결과: 영상 옆(예전 방식) 또는 실제 보관함
+    src = next((d for d in (SAMPLE.with_name(SAMPLE.stem + ".blurface"),
+                            Path("~/Movies/BlurFace").expanduser() / (SAMPLE.stem + ".blurface"))
+                if (d / "project.json").exists()), None)
+    if not SAMPLE.exists() or src is None:
         pytest.skip("샘플 영상·분석 결과 없음")
     video = tmp_path / SAMPLE.name
     shutil.copy(SAMPLE, video)
-    shutil.copytree(SAMPLE.with_name(SAMPLE.stem + ".blurface"), tmp_path / (SAMPLE.stem + ".blurface"))
+    shutil.copytree(src, tmp_path / (SAMPLE.stem + ".blurface"))  # 영상 옆에 두면 열 때 보관함으로 옮겨짐
     w = MainWindow()
     w.resize(1400, 860)
     w.show()
@@ -425,3 +429,34 @@ def test_notify_only_when_not_looking(app, opened, monkeypatch):
 def test_notify_quotes():
     from blurface.gui.notify import _quote
     assert _quote('a "b" \\c') == '"a \\"b\\" \\\\c"'
+
+
+def test_sidebar_lists_and_reopens_projects(app, opened, tmp_path, monkeypatch):
+    import shutil
+
+    from blurface import projects
+    w = opened
+    d = w.project.dir
+    assert d.parent == projects.root()  # 영상 옆 예전 폴더가 보관함으로 옮겨짐
+    assert [m["dir"] for m in w.sidebar.items] == [d] and w.sidebar.list.currentRow() == 0
+    assert (d / "cover.jpg").exists()  # 표지 자동 생성
+    # 원본 영상을 옮기면 다시 연결해서 열기
+    video = Path(w.project.video.path)
+    w.project = None
+    moved = tmp_path / "moved" / video.name
+    moved.parent.mkdir()
+    shutil.move(str(video), moved)
+    w.sidebar.refresh()
+    assert not w.sidebar.items[0]["video_exists"]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr("blurface.gui.app.QFileDialog.getOpenFileName", lambda *a, **k: (str(moved), ""))
+    w.open_project(w.sidebar.items[0])
+    assert w.project is not None and w.project.dir == d and Path(w.project.video.path) == moved
+
+
+def test_cannot_delete_open_project(app, opened, monkeypatch):
+    w = opened
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
+    w._delete_project(w.sidebar.items[0])
+    assert shown and w.project.dir.exists()

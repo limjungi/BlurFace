@@ -1,6 +1,6 @@
 """프로젝트 파일: 분석 결과와 사용자 수정·설정을 저장한다.
 
-영상 옆 `<이름>.blurface/project.json`에 저장.
+프로젝트 보관함(기본 ~/Movies/BlurFace, projects.py)의 `<이름>.blurface/project.json`에 저장.
 - auto: 자동 분석 결과 (바꾸지 않음)
 - tracks: 사람이 고칠 수 있는 트랙. 자동 결과를 가리키고(auto, span) 그 위에 수동 키프레임(keys)과 지운 구간(removed)을 얹는다
 - persons: 인물 이름·효과·구간 효과
@@ -131,8 +131,8 @@ class Project:
 
     @staticmethod
     def dir_for(video: str | Path) -> Path:
-        v = Path(video)
-        return v.with_name(v.stem + ".blurface")
+        from . import projects
+        return projects.dir_for(video)
 
     @property
     def dir(self) -> Path:
@@ -524,6 +524,11 @@ class Project:
             "pts": [round(x, 6) for x in self.pts],
         }
         path.write_text(json.dumps(data, ensure_ascii=False))
+        from . import projects
+        projects.write_meta(self.dir, {
+            "video": str(Path(self.video.path).expanduser().resolve()), "name": Path(self.video.path).stem,
+            "duration": self.time_of(self.n_frames - 1) if self.n_frames else 0.0,
+            "persons": len(self.persons), "updated": time.time()})
         return path
 
     # ---------- 백업 (다시 분석하기 전 상태 보관) ----------

@@ -35,6 +35,12 @@ QSlider::handle:horizontal {{ background: #f2f2f7; width: 16px; height: 16px; ma
 QCheckBox {{ color: #d1d1d6; spacing: 6px; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid #48484a; background: #2c2c2e; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT}; }}
+QWidget#sidebar {{ background: #1c1c1e; border-right: 1px solid #2c2c2e; }}
+QLabel#sideTitle {{ font-size: 13px; font-weight: 600; color: #f2f2f7; }}
+QListWidget#projects {{ background: transparent; border: none; outline: none; padding: 0 6px; }}
+QListWidget#projects::item {{ border-radius: 8px; padding: 4px 6px; color: #f2f2f7; }}
+QListWidget#projects::item:hover {{ background: #2c2c2e; }}
+QListWidget#projects::item:selected {{ background: rgba(10, 132, 255, 0.85); color: white; }}
 QPushButton {{ background: #3a3a3c; border: none; border-radius: 6px; padding: 6px 12px; }}
 QPushButton:hover {{ background: #48484a; }}
 QPushButton:pressed {{ background: #545458; }}

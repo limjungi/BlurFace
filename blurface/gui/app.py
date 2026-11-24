@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGr
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
+from .. import projects
 from ..effects import grow, shrink
 from ..persons import face_crop
 from ..project import Project
@@ -28,6 +29,7 @@ from .source import FrameSource
 from .theme import apply_theme
 from .widgets import (ALL, PRESETS, EffectPicker, PersonTimeline, Row, SeekBar, VideoView, arrow_icon, effect_short,
                       preset_effect, preset_icon, preset_of, tool_icon)
+from .sidebar import ProjectSidebar
 from .workers import AnalyzeWorker, ExportWorker
 
 VIDEO_EXT = "영상 (*.mp4 *.mov *.m4v *.mkv *.avi *.webm)"
@@ -266,7 +268,22 @@ class MainWindow(QMainWindow):
         main.addWidget(self.timeline_w)
         main.setSizes([600, 260])
         main.setStretchFactor(0, 1)
-        self.setCentralWidget(main)
+        # 왼쪽 사이드바: 프로젝트 보관함
+        self.sidebar = ProjectSidebar()
+        self.sidebar.open_requested.connect(self.open_project)
+        self.sidebar.menu_requested.connect(self._project_menu)
+        self.sidebar.add_requested.connect(self.open_dialog)
+        self.sidebar.reveal_root.connect(lambda: subprocess.run(["open", str(projects.root())], check=False)
+                                         if projects.root().exists() else None)
+        outer = QSplitter(Qt.Orientation.Horizontal)
+        outer.addWidget(self.sidebar)
+        outer.addWidget(main)
+        outer.setSizes([240, 1200])
+        outer.setStretchFactor(1, 1)
+        outer.setCollapsible(1, False)
+        self.setCentralWidget(outer)
+        self.sidebar.setVisible(QSettings("BlurFace", "BlurFace").value("sidebar", True, type=bool))
+        self.sidebar.refresh()
 
     def _build_inspector(self) -> QWidget:
         panel = QWidget()
@@ -418,7 +435,9 @@ class MainWindow(QMainWindow):
         mb = self.menuBar()
         m = mb.addMenu("파일")
         m.addAction(self.act_about)
-        for a in (self.act_open, self.act_export, None, self.act_reanalyze, self.act_restore, None, self.act_notify):
+        self.act_root = QAction("프로젝트 저장 위치…", self, triggered=self.choose_root)
+        for a in (self.act_open, self.act_export, None, self.act_reanalyze, self.act_restore, None, self.act_root,
+                  self.act_notify):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("편집")
         for a in (self.act_undo, self.act_redo, None, self.act_blade, self.act_unsplit, self.act_delete, None,
@@ -438,7 +457,9 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("보기")
         self.act_zoom_in.setText("타임라인 확대")
         self.act_zoom_out.setText("타임라인 축소")
-        for a in (self.act_zoom_in, self.act_zoom_out, self.act_zoom_fit, None, self.act_full):
+        self.act_sidebar = QAction("사이드바 보기", self, checkable=True, shortcut="Ctrl+Alt+S",
+                                   checked=self.sidebar.isVisible(), toggled=self.toggle_sidebar)
+        for a in (self.act_sidebar, None, self.act_zoom_in, self.act_zoom_out, self.act_zoom_fit, None, self.act_full):
             m.addSeparator() if a is None else m.addAction(a)
         self.act_zoom_in.setIconText("+")
         self.act_zoom_out.setIconText("−")
@@ -569,8 +590,86 @@ class MainWindow(QMainWindow):
                                   f"({project.timings.get('total_analyze', 0):.0f}초)")
         self._notify("분석 완료", f"인물 {len(project.persons)}명을 찾았어요. 효과를 확인해 보세요.")
 
+    # ---------- 프로젝트 보관함 ----------
+    def toggle_sidebar(self, on: bool):
+        self.sidebar.setVisible(on)
+        QSettings("BlurFace", "BlurFace").setValue("sidebar", on)
+
+    def open_project(self, meta: dict):
+        """사이드바에서 고른 프로젝트 열기. 원본 영상이 옮겨졌으면 다시 연결."""
+        if self.project and self.project.dir == meta["dir"]:
+            return
+        if not meta["video_exists"]:
+            if not self._relink(meta):
+                return
+        self.open_video(projects.read_meta(meta["dir"])["video"])
+
+    def _relink(self, meta: dict) -> bool:
+        name = Path(meta.get("video", "")).name
+        if QMessageBox.question(self, "원본 영상을 찾을 수 없어요",
+                                f"'{name}'이(가) 옮겨졌거나 지워졌어요.\n옮긴 영상을 찾아서 다시 연결할까요?") \
+                != QMessageBox.StandardButton.Yes:
+            return False
+        path, _ = QFileDialog.getOpenFileName(self, f"원본 영상 찾기: {name}", str(Path.home()),
+                                              "영상 (*.mp4 *.mov *.m4v *.mkv *.avi *.webm)")
+        if not path:
+            return False
+        projects.relink(meta["dir"], path)
+        self.sidebar.refresh(self.project.dir if self.project else None)
+        return True
+
+    def _project_menu(self, meta: dict, pos):
+        m = QMenu(self)
+        d = meta["dir"]
+        m.addAction("열기").triggered.connect(lambda: self.open_project(meta))
+        m.addSeparator()
+        if meta["video_exists"]:
+            m.addAction("원본 영상 Finder에서 보기").triggered.connect(
+                lambda: subprocess.run(["open", "-R", meta["video"]], check=False))
+        m.addAction("원본 영상 다시 연결…").triggered.connect(lambda: self._relink({**meta, "video_exists": False}))
+        m.addAction("프로젝트 폴더 Finder에서 보기").triggered.connect(
+            lambda: subprocess.run(["open", "-R", str(d)], check=False))
+        m.addSeparator()
+        m.addAction("프로젝트 삭제 (휴지통으로)").triggered.connect(lambda: self._delete_project(meta))
+        m.exec(pos)
+
+    def _delete_project(self, meta: dict):
+        if self.project and self.project.dir == meta["dir"]:
+            QMessageBox.information(self, "프로젝트 삭제", "지금 열려 있는 프로젝트는 지울 수 없어요. 다른 영상을 연 뒤 지워 주세요.")
+            return
+        if QMessageBox.question(self, "프로젝트 삭제",
+                                f"'{meta.get('name')}' 프로젝트(분석 결과·효과·고친 상자)를 휴지통으로 옮길까요?\n"
+                                "원본 영상과 내보낸 영상은 지워지지 않아요.") != QMessageBox.StandardButton.Yes:
+            return
+        projects.trash(meta["dir"])
+        self.sidebar.refresh(self.project.dir if self.project else None)
+
+    def choose_root(self):
+        cur = projects.root()
+        path = QFileDialog.getExistingDirectory(self, "프로젝트 저장 위치", str(cur if cur.exists() else Path.home()))
+        if not path or Path(path) == cur:
+            return
+        move = False
+        if projects.list_projects():
+            r = QMessageBox.question(self, "프로젝트 저장 위치", "지금까지의 프로젝트도 새 위치로 옮길까요?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                                     | QMessageBox.StandardButton.Cancel)
+            if r == QMessageBox.StandardButton.Cancel:
+                return
+            move = r == QMessageBox.StandardButton.Yes
+        if move and self.project:
+            self.project.save()
+        failed = projects.set_root(path, move)
+        if failed:
+            QMessageBox.warning(self, "프로젝트 저장 위치", "옮기지 못한 프로젝트:\n" + "\n".join(failed))
+        if self.project and move:
+            self.project = Project.load(self.project.video.path) or self.project
+        self.sidebar.refresh(self.project.dir if self.project else None)
+        self.status_label.setText(f"프로젝트 저장 위치: {path}")
+
     def _set_project(self, project: Project):
         self.project = project
+        self.sidebar.refresh(project.dir)
         self.sel_track = None
         self.piece = None
         self.picked = set()
@@ -1279,11 +1378,13 @@ class MainWindow(QMainWindow):
 
     def toggle_fullscreen(self):
         full = not self.isFullScreen()
-        for w in (self.inspector, self.statusBar()):
+        for w in (self.inspector, self.statusBar(), self.sidebar):
             w.setVisible(not full)
         for tb in self.findChildren(QToolBar):
             tb.setVisible(not full)
         self.timeline_w.setVisible(not full)
+        if not full:
+            self.sidebar.setVisible(self.act_sidebar.isChecked())  # 사용자가 숨겨 둔 사이드바는 그대로
         if full:
             self.showFullScreen()
             self._hide_timer.start()
