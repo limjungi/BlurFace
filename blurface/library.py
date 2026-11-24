@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-EXTS = (".png", ".jpg", ".jpeg", ".webp")
+EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 
 def folder() -> Path:

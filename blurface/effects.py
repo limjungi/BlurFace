@@ -99,22 +99,60 @@ def builtin_sticker(name: str) -> np.ndarray:
     return s
 
 
-@lru_cache(maxsize=32)
-def load_image(path: str) -> np.ndarray:
-    im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    if im is None:
-        raise ValueError(f"이미지를 읽을 수 없음: {path}")
+def _to_bgra(im: np.ndarray) -> np.ndarray:
     if im.ndim == 2:
         im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGRA)
     elif im.shape[2] == 3:
         im = cv2.cvtColor(im, cv2.COLOR_BGR2BGRA)
     if im.dtype != np.uint8:
         im = (im / 257).astype(np.uint8)
-    # 투명한 여백을 잘라 내서 보이는 그림이 얼굴 영역을 꽉 채우게
-    ys, xs = np.nonzero(im[:, :, 3] > 10)
+    return im
+
+
+@lru_cache(maxsize=32)
+def load_frames(path: str) -> tuple[list[np.ndarray], list[float]]:
+    """이미지 프레임들(BGRA)과 프레임별 표시 시간(초). 움직이는 GIF는 여러 장, 나머지는 한 장."""
+    frames: list[np.ndarray] = []
+    durations: list[float] = []
+    if path.lower().endswith(".gif"):
+        import av
+        with av.open(path) as c:
+            s = c.streams.video[0]
+            tb = float(s.time_base or 0.01)
+            last = None
+            for f in c.decode(s):
+                frames.append(f.to_ndarray(format="bgra"))
+                if last is not None and f.pts is not None:
+                    durations.append(max(0.02, (f.pts - last) * tb))
+                last = f.pts
+            if frames:
+                durations.append(durations[-1] if durations else 0.1)
+    if not frames:
+        im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if im is None:
+            raise ValueError(f"이미지를 읽을 수 없음: {path}")
+        frames, durations = [_to_bgra(im)], [1.0]
+    # 투명한 여백을 잘라 내서 보이는 그림이 얼굴 영역을 꽉 채우게 (움직이는 그림은 모든 프레임 기준으로 같게)
+    mask = np.zeros(frames[0].shape[:2], bool)
+    for f in frames:
+        mask |= f[:, :, 3] > 10
+    ys, xs = np.nonzero(mask)
     if len(xs):
-        im = im[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    return np.ascontiguousarray(im)
+        frames = [np.ascontiguousarray(f[ys.min():ys.max() + 1, xs.min():xs.max() + 1]) for f in frames]
+    return frames, durations
+
+
+def load_image(path: str, t: float = 0.0) -> np.ndarray:
+    """t초 시점의 이미지 (움직이는 GIF는 반복 재생)."""
+    frames, durations = load_frames(path)
+    if len(frames) == 1:
+        return frames[0]
+    t %= sum(durations)
+    for f, d in zip(frames, durations):
+        if t < d:
+            return f
+        t -= d
+    return frames[-1]
 
 
 def overlay(img, box, rgba: np.ndarray):
@@ -161,9 +199,10 @@ def _draw_shape(mask: np.ndarray, box, shape: str):
         cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
 
 
-def apply(img: np.ndarray, box, effect: dict):
+def apply(img: np.ndarray, box, effect: dict, t: float = 0.0):
     """box는 가릴 영역 (화면 밖으로 나가도 됨).
 
+    t: 영상 시각(초). 움직이는 GIF 스티커의 프레임을 고르는 데 씀.
     effect 추가 옵션: shape(rect|rounded|ellipse), feather(가장자리 부드럽게, 상자 짧은 변의 %), scale(범위 %, cover_box에서 반영)
     """
     h, w = img.shape[:2]
@@ -179,7 +218,7 @@ def apply(img: np.ndarray, box, effect: dict):
         # 기본 스티커는 켜짐, 내 이미지는 꺼짐 (이미지만 깔끔하게 보이도록)
         if effect.get("under", kind == "sticker"):
             blur(img, c, 60)
-        overlay(img, full, builtin_sticker(value or "smile") if kind == "sticker" else load_image(value))
+        overlay(img, full, builtin_sticker(value or "smile") if kind == "sticker" else load_image(value, t))
         return
     shape = effect.get("shape", "rect")
     f = int(min(full[2] - full[0], full[3] - full[1]) * effect.get("feather", 0) / 100)

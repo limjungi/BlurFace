@@ -226,3 +226,33 @@ def test_image_has_no_blur_underneath_by_default(tmp_path):
     img2 = before.copy()
     apply(img2, [100, 100, 200, 200], parse_effect(f"image:{png},under=1"))
     assert not np.array_equal(img2[corner], before[corner])  # 옵션을 켜면 흐림
+
+
+def _make_gif(tmp_path):
+    """빨강 원 → 파랑 원 두 장짜리, 배경 투명, 장당 0.5초인 움직이는 GIF."""
+    import subprocess
+
+    import cv2
+    for i, color in enumerate([(0, 0, 255, 255), (255, 0, 0, 255)]):
+        f = np.zeros((60, 60, 4), np.uint8)
+        cv2.circle(f, (30, 30), 20, color, -1)
+        cv2.imwrite(str(tmp_path / f"f{i}.png"), f)
+    gif = tmp_path / "anim.gif"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-framerate", "2", "-i", str(tmp_path / "f%d.png"),
+                    "-filter_complex", "split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse",
+                    str(gif)], check=True)
+    return gif
+
+
+def test_animated_gif_frames_follow_video_time(tmp_path):
+    from blurface.effects import load_frames, load_image
+    gif = str(_make_gif(tmp_path))
+    frames, durations = load_frames(gif)
+    assert len(frames) == 2 and durations == pytest.approx([0.5, 0.5], abs=0.02)
+    assert frames[0].shape[:2] == (41, 41)  # 투명 여백 잘림
+    c0, c1 = load_image(gif, 0.1)[20, 20], load_image(gif, 0.7)[20, 20]
+    assert c0[2] > 200 and c1[0] > 200  # 0.1초 빨강, 0.7초 파랑
+    assert load_image(gif, 1.1)[20, 20][2] > 200  # 반복
+    img = np.zeros((200, 200, 3), np.uint8)
+    apply(img, [50, 50, 150, 150], parse_effect(f"image:{gif}"), t=0.7)
+    assert img[100, 100][0] > 200 and img[52, 52].sum() == 0  # 파랑, 모서리는 투명(원본)
