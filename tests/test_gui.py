@@ -168,3 +168,18 @@ def test_delete_split_merge_and_review(app, opened):
         w.seek(0)
         w.next_review()
         assert w.frame == next((rf for rf, _ in w.review if rf > 0), w.review[0][0])
+
+
+def test_restore_backup_brings_back_settings(app, opened):
+    w = opened
+    p = w.project
+    pid = min(p.persons)
+    p.persons[pid].effect = {"type": "sticker", "value": "heart"}
+    w._changed()
+    path = p.video.path
+    backup = Project.backup(path)
+    p.persons[pid].effect = None  # 다시 분석으로 설정이 사라졌다고 가정
+    w._changed()
+    w.restore_backup(backup)
+    assert w.project.persons[pid].effect == {"type": "sticker", "value": "heart"}
+    assert w.act_restore.isEnabled()
