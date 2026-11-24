@@ -54,6 +54,14 @@ def opened(app, tmp_path):
     w.resize(1400, 860)
     w.show()
     w.open_video(str(video))
+    # 샘플 프로젝트에 남아 있을 수 있는 설정을 지우고 깨끗한 상태에서 시작
+    from blurface.project import DEFAULT_EFFECT
+    pr = w.project
+    pr.default_effect = dict(DEFAULT_EFFECT)
+    for person in pr.persons.values():
+        person.effect, person.segments, person.splits = None, [], []
+    pr.save()
+    w._set_project(Project.load(video))
     app.processEvents()
     yield w
     w.close()
@@ -185,18 +193,106 @@ def test_drag_on_person_row_adds_segment(app, opened):
     assert not w.project.persons[pid].segments
 
 
-def test_timeline_drag_emits_range(app, opened):
+def _press(tl, x, y, release_x=None):
     from PySide6.QtCore import QPointF
+    from PySide6.QtTest import QTest
+    QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=QPointF(x, y).toPoint())
+    if release_x is not None:
+        QTest.mouseMove(tl, QPointF((x + release_x) / 2, y).toPoint())
+        QTest.mouseMove(tl, QPointF(release_x, y).toPoint())
+    QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=QPointF(release_x or x, y).toPoint())
+
+
+def _row_y(tl, i):
+    return tl.RULER + tl.ROW * i + tl.ROW // 2 - tl.scroll.value()
+
+
+def test_blade_then_piece_effect(app, opened):
+    w = opened
+    p = w.project
+    pid = w.timeline.rows[1].pid
+    w.select_person(pid)
+    w.seek(100)
+    w.blade()
+    w.seek(200)
+    w.blade()
+    assert p.persons[pid].splits == [100, 200] and w.piece == (200, p.n_frames)  # 재생 위치가 든 조각 선택
+    w._on_piece_clicked(pid, 150)
+    w._apply_preset(pid, "heart", w.piece)
+    assert p.effect_for(pid, 150)["value"] == "heart" and p.effect_for(pid, 99)["type"] == "blur"
+    assert w.picker.key == "heart"
+    w.undo()
+    assert p.effect_for(pid, 150)["type"] == "blur"
+
+
+def test_drag_split_line_resizes_piece(app, opened):
+    w = opened
+    p = w.project
+    tl = w.timeline
+    pid = tl.rows[1].pid
+    p.add_segment(pid, 100, 200, preset_effect("smile"))
+    w._changed()
+    got = []
+    tl.split_moved.connect(lambda *a: got.append(a))
+    _press(tl, tl._x(200), _row_y(tl, 1), tl._x(260))
+    assert got and got[0][:2] == (pid, 200) and abs(got[0][2] - 260) <= 2
+    assert p.persons[pid].segments[0]["end"] == p.persons[pid].splits[1]
+
+
+def test_zoom_keeps_anchor_and_pans(app, opened):
+    tl = opened.timeline
+    x = tl._x(300)
+    tl.zoom_by(4, x)
+    assert tl.zoom == 4 and abs(tl._frame_at(x) - 300) <= 2 and tl.hscroll.isVisible()
+    tl.zoom_by(0.01)
+    assert tl.zoom == 1 and tl.offset == 0
+
+
+def test_double_click_name_renames(app, opened):
     from PySide6.QtTest import QTest
     w = opened
     tl = w.timeline
-    got = []
-    tl.range_picked.disconnect()
-    tl.range_picked.connect(lambda pid, a, b, _pos: got.append((pid, a, b)))
-    y = tl.RULER + tl.ROW * 1 + tl.ROW // 2 - tl.scroll.value()
-    x0, x1 = tl._x(100), tl._x(200)
-    QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=QPointF(x0, y).toPoint())
-    QTest.mouseMove(tl, QPointF(x0 + 20, y).toPoint())
-    QTest.mouseMove(tl, QPointF(x1, y).toPoint())
-    QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=QPointF(x1, y).toPoint())
-    assert got and got[0][0] == tl.rows[1].pid and abs(got[0][1] - 100) <= 2 and abs(got[0][2] - 201) <= 2
+    pid = tl.rows[1].pid
+    assert tl.rows[1].name == f"인물 {pid + 1}"  # 1번부터
+    tl.start_rename(1)
+    tl.editor.setText("철수")
+    QTest.keyClick(tl.editor, Qt.Key.Key_Return)
+    assert w.project.persons[pid].name == "철수"
+
+
+def test_all_effect_warns_when_persons_have_own(app, opened, monkeypatch):
+    w = opened
+    p = w.project
+    pid = w.timeline.rows[1].pid
+    w._apply_preset(pid, "heart")
+    w.select_person(ALL)
+    asked = []
+    monkeypatch.setattr(w, "_ask_all", lambda n: asked.append(n) or "cancel")
+    w.set_effect(ALL, preset_effect("mosaic"))
+    assert asked == [1] and p.default_effect["type"] == "blur"  # 취소
+    monkeypatch.setattr(w, "_ask_all", lambda n: "all")
+    w.set_effect(ALL, preset_effect("mosaic"))
+    assert p.default_effect["type"] == "mosaic" and p.persons[pid].effect is None
+
+
+def test_image_library_keeps_uploads(app, tmp_path, monkeypatch):
+    import cv2
+    import numpy as np
+    from blurface import library
+    monkeypatch.setenv("BLURFACE_HOME", str(tmp_path / "home"))
+    img = tmp_path / "me.png"
+    cv2.imwrite(str(img), np.full((20, 20, 4), 255, np.uint8))
+    a = library.add(img)
+    assert library.add(img) == a and library.images() == [a]  # 같은 그림은 한 번만
+    picker = EffectPicker()
+    picker._on_click("image")  # 보관함에 있으면 바로 선택
+    assert picker.effect() == {"type": "image", "value": str(a)}
+    assert picker.lib_grid.count() == 2  # 그림 1 + 올리기 버튼
+
+
+def test_fullscreen_hides_panels(app, opened):
+    w = opened
+    w.toggle_fullscreen()
+    assert not w.timeline.isVisible() and not w.inspector.isVisible()
+    w._escape()
+    assert w.timeline.isVisible()

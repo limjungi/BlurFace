@@ -108,7 +108,13 @@ def load_image(path: str) -> np.ndarray:
         im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGRA)
     elif im.shape[2] == 3:
         im = cv2.cvtColor(im, cv2.COLOR_BGR2BGRA)
-    return im
+    if im.dtype != np.uint8:
+        im = (im / 257).astype(np.uint8)
+    # 투명한 여백을 잘라 내서 보이는 그림이 얼굴 영역을 꽉 채우게
+    ys, xs = np.nonzero(im[:, :, 3] > 10)
+    if len(xs):
+        im = im[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    return np.ascontiguousarray(im)
 
 
 def overlay(img, box, rgba: np.ndarray):
@@ -169,8 +175,10 @@ def apply(img: np.ndarray, box, effect: dict):
     if kind == "none":
         return
     if kind in ("sticker", "image"):
-        # 스티커의 투명한 틈(하트 모양 바깥 등)으로 얼굴이 보이지 않도록 먼저 강하게 흐린 뒤 얹는다
-        blur(img, c, 60)
+        # under: 그림의 투명한 틈(하트 모양 바깥 등)으로 얼굴이 보이지 않게 아래를 먼저 흐림.
+        # 기본 스티커는 켜짐, 내 이미지는 꺼짐 (이미지만 깔끔하게 보이도록)
+        if effect.get("under", kind == "sticker"):
+            blur(img, c, 60)
         overlay(img, full, builtin_sticker(value or "smile") if kind == "sticker" else load_image(value))
         return
     shape = effect.get("shape", "rect")

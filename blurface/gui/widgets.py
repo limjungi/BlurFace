@@ -6,11 +6,14 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QRadialGradient)
-from PySide6.QtWidgets import (QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QGridLayout, QLabel,
-                               QPushButton, QScrollBar, QSizePolicy, QSpinBox, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QFileDialog, QFormLayout, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollBar, QSizePolicy, QSlider,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from ..effects import builtin_sticker
 
@@ -177,6 +180,52 @@ class VideoView(QWidget):
         self.selected: int | None = None
         self._drag: dict | None = None
         self.setMouseTracking(True)
+        self.busy: str | None = None  # 분석 중 안내 문구
+        self.busy_progress: float | None = None  # 0~1, 모르면 None
+        self._spin = 0
+        self._spin_timer = QTimer(self, interval=16)
+        self._spin_timer.timeout.connect(self._tick_spin)
+
+    def set_busy(self, text: str | None, progress: float | None = None):
+        """분석 중: 화면을 어둡게 하고 가운데 진행 원과 문구를 띄운다. text=None이면 끔."""
+        self.busy, self.busy_progress = text, progress
+        if text and not self._spin_timer.isActive():
+            self._spin_timer.start()
+        elif not text:
+            self._spin_timer.stop()
+        self.update()
+
+    def _tick_spin(self):
+        self._spin = (self._spin + 6) % 360
+        self.update()
+
+    def _paint_busy(self, p: QPainter):
+        a = self._area() if self._pix is not None else QRectF(self.rect())
+        p.fillRect(a, QColor(0, 0, 0, 150))
+        c = a.center()
+        r = QRectF(c.x() - 26, c.y() - 40, 52, 52)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 50), 5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(r)
+        pen = QPen(QColor("#0a84ff"), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        if self.busy_progress is None:
+            p.drawArc(r, -self._spin * 16, 90 * 16)
+        else:
+            p.drawArc(r, 90 * 16, -int(360 * 16 * max(0.02, min(1.0, self.busy_progress))))
+            font = p.font()
+            font.setPointSizeF(11)
+            font.setWeight(QFont.Weight.DemiBold)
+            p.setFont(font)
+            p.setPen(QColor("#ffffff"))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, f"{int(self.busy_progress * 100)}%")
+        font = p.font()
+        font.setPointSizeF(14)
+        font.setWeight(QFont.Weight.DemiBold)
+        p.setFont(font)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(QRectF(a.x(), c.y() + 22, a.width(), 26), Qt.AlignmentFlag.AlignCenter, self.busy)
 
     def set_image(self, img: np.ndarray | None):
         if img is None:
@@ -217,11 +266,17 @@ class VideoView(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor("#0b0b0c"))
         if self._pix is None:
+            if self.busy:
+                self._paint_busy(p)
+                return
             p.setPen(QColor("#8e8e93"))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
             return
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawPixmap(self._area(), self._pix, QRectF(self._pix.rect()))
+        if self.busy:
+            self._paint_busy(p)
+            return
         if not self.edit:
             return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -343,23 +398,29 @@ class Row:
     review: list[int] = field(default_factory=list)  # 확인이 필요한 위치
     warn: bool = False
     pix: QPixmap | None = None
+    splits: list[int] = field(default_factory=list)  # 자른 곳
 
 
 class PersonTimeline(QWidget):
     """파이널컷처럼 인물마다 한 줄. 막대 색 = 걸린 효과.
 
-    - 눈금 클릭·끌기: 이동
-    - 줄 왼쪽(이름) 클릭: 인물 선택 (⌘-클릭 여러 명), 효과 칩 클릭: 효과 메뉴, 우클릭: 인물 메뉴
-    - 줄 안쪽 클릭: 그 위치로 이동, 옆으로 끌기: 그 구간만 다른 효과
+    - 눈금 클릭·끌기: 이동. 핀치·⌘+스크롤: 확대/축소, 가로 스크롤: 좌우 이동
+    - 이름 클릭: 인물 선택(⌘-클릭 여러 명), 더블클릭: 이름 바꾸기, 효과 칩: 효과 메뉴, 우클릭: 메뉴
+    - 막대 클릭: 그 조각 선택 + 이동. 자른 곳(노란 선)·막대 끝을 좌우로 끌면 길이 조절
     """
 
     seek = Signal(int)
     person_clicked = Signal(int, bool)  # 인물, ⌘ 누름
+    piece_clicked = Signal(int, int)  # 인물, 프레임
     effect_menu = Signal(int, QPoint)
-    range_picked = Signal(int, int, int, QPoint)  # 인물, 시작, 끝(포함 안 함), 메뉴 위치
-    context_menu = Signal(int, QPoint)
+    context_menu = Signal(int, QPoint)  # 이름 칸 우클릭
+    piece_menu = Signal(int, int, QPoint)  # 막대 칸 우클릭: 인물, 프레임
+    split_moved = Signal(int, int, int)  # 인물, 원래 위치, 새 위치
+    trimmed = Signal(int, int, int)  # 인물, 막대 끝 원래 위치, 새 위치
+    renamed = Signal(int, str)
 
-    RULER, ROW, LABEL = 28, 40, 230
+    RULER, ROW, LABEL, HBAR = 28, 40, 230, 10
+    HANDLE = 6  # 끌기 손잡이 판정 거리(px)
 
     def __init__(self):
         super().__init__()
@@ -370,32 +431,98 @@ class PersonTimeline(QWidget):
         self.rows: list[Row] = []
         self.current: int | None = None
         self.picked: set[int] = set()
+        self.piece: tuple[int, int] | None = None  # 선택한 조각 (현재 인물)
         self.mark_in: int | None = None
         self.mark_out: int | None = None
+        self.zoom = 1.0  # 1 = 영상 전체가 한 화면
+        self.offset = 0.0  # 화면 왼쪽 끝 프레임
         self._drag: dict | None = None
         self.scroll = QScrollBar(Qt.Orientation.Vertical, self)
         self.scroll.valueChanged.connect(self.update)
-        self.setMinimumHeight(self.RULER + self.ROW * 3)
+        self.hscroll = QScrollBar(Qt.Orientation.Horizontal, self)
+        self.hscroll.valueChanged.connect(self._on_hscroll)
+        self.editor = QLineEdit(self)
+        self.editor.hide()
+        self.editor.editingFinished.connect(self._finish_rename)
+        self._edit_pid: int | None = None
+        self.setMinimumHeight(self.RULER + self.ROW * 3 + self.HBAR)
         self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
 
     # 데이터
     def set_data(self, n: int, fps: float, cuts: list[int]):
         self.n, self.fps, self.cuts = n, fps, cuts
-        self.update()
-
-    def set_rows(self, rows: list[Row], current: int | None, picked: set[int]):
-        self.rows = rows
-        self.set_selection(current, picked)
+        self.zoom, self.offset = 1.0, 0.0
         self._layout()
 
-    def set_selection(self, current: int | None, picked: set[int]):
-        self.current, self.picked = current, set(picked)
+    def set_rows(self, rows: list[Row], current: int | None, picked: set[int], piece=None):
+        self.rows = rows
+        self.set_selection(current, picked, piece)
+        self._layout()
+
+    def set_selection(self, current: int | None, picked: set[int], piece=None):
+        self.current, self.picked, self.piece = current, set(picked), piece
         self.update()
 
     def set_pos(self, f: int):
-        if f != self.pos:
-            self.pos = f
-            self.update()
+        if f == self.pos:
+            return
+        self.pos = f
+        vis = self._visible()
+        if self.zoom > 1 and not (self.offset <= f < self.offset + vis):  # 재생 위치가 화면 밖이면 따라감
+            self._set_offset(f - vis * 0.1)
+        self.update()
+
+    # 확대/축소
+    def _visible(self) -> float:
+        return max(1.0, self.n / self.zoom)
+
+    def _set_offset(self, off: float):
+        self.offset = max(0.0, min(self.n - self._visible(), off))
+        self.hscroll.blockSignals(True)
+        self.hscroll.setValue(int(self.offset))
+        self.hscroll.blockSignals(False)
+        self.update()
+
+    def _on_hscroll(self, v: int):
+        self.offset = float(v)
+        self.update()
+
+    def zoom_by(self, factor: float, anchor_x: float | None = None):
+        if not self.n:
+            return
+        x0, x1 = self._span()
+        ax = anchor_x if anchor_x is not None else self._x(self.pos)
+        ax = min(max(ax, x0), x1)
+        f_anchor = self.offset + (ax - x0) / (x1 - x0) * self._visible()
+        max_zoom = max(1.0, self.n / max(10.0, self.fps * 1.0))  # 최대 1초가 한 화면
+        self.zoom = min(max_zoom, max(1.0, self.zoom * factor))
+        self._layout()
+        self._set_offset(f_anchor - (ax - x0) / (x1 - x0) * self._visible())
+
+    def event(self, e):
+        from PySide6.QtCore import QEvent
+        if e.type() == QEvent.Type.NativeGesture and e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+            self.zoom_by(1 + e.value(), e.position().x())  # 트랙패드 핀치
+            return True
+        return super().event(e)
+
+    def wheelEvent(self, e):
+        mods = e.modifiers()
+        dy = e.angleDelta().y()
+        dx = e.pixelDelta().x() or e.angleDelta().x()
+        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier) \
+                or e.position().y() < self.RULER:
+            self.zoom_by(1.0015 ** dy, e.position().x())  # ⌘+스크롤, 눈금 위 스크롤: 확대/축소
+            return
+        if mods & Qt.KeyboardModifier.ShiftModifier and not dx:
+            dx = dy
+            dy = 0
+        if dx and self.zoom > 1:
+            x0, x1 = self._span()
+            self._set_offset(self.offset - dx / (x1 - x0) * self._visible())
+        if dy and self.scroll.isVisible():
+            self.scroll.setValue(self.scroll.value() - dy // 2)
 
     # 배치·좌표
     def resizeEvent(self, e):
@@ -403,13 +530,22 @@ class PersonTimeline(QWidget):
         super().resizeEvent(e)
 
     def _layout(self):
-        view = self.height() - self.RULER
+        hb = self.HBAR if self.zoom > 1 else 0
+        view = self.height() - self.RULER - hb
         total = len(self.rows) * self.ROW
         self.scroll.setGeometry(self.width() - 10, self.RULER, 10, max(0, view))
         self.scroll.setRange(0, max(0, total - view))
         self.scroll.setPageStep(max(1, view))
         self.scroll.setSingleStep(self.ROW // 2)
         self.scroll.setVisible(total > view)
+        x0, x1 = self._span()
+        self.hscroll.setGeometry(int(x0), self.height() - self.HBAR, int(x1 - x0), self.HBAR)
+        self.hscroll.setVisible(self.zoom > 1)
+        self.hscroll.blockSignals(True)
+        self.hscroll.setRange(0, max(0, int(self.n - self._visible())))
+        self.hscroll.setPageStep(int(self._visible()))
+        self.hscroll.setValue(int(self.offset))
+        self.hscroll.blockSignals(False)
         self.update()
 
     def _span(self) -> tuple[float, float]:
@@ -418,17 +554,17 @@ class PersonTimeline(QWidget):
 
     def _x(self, f: float) -> float:
         x0, x1 = self._span()
-        return x0 + (x1 - x0) * f / max(1, self.n)
+        return x0 + (x1 - x0) * (f - self.offset) / self._visible()
 
     def _frame_at(self, x: float) -> int:
         x0, x1 = self._span()
-        return max(0, min(self.n - 1, int(round((x - x0) / (x1 - x0) * self.n))))
+        return max(0, min(self.n - 1, int(round(self.offset + (x - x0) / (x1 - x0) * self._visible()))))
 
     def _top(self, i: int) -> float:
         return self.RULER + i * self.ROW - self.scroll.value()
 
     def _row_at(self, y: float) -> int | None:
-        if y < self.RULER:
+        if y < self.RULER or y > self.height() - (self.HBAR if self.zoom > 1 else 0):
             return None
         i = int((y - self.RULER + self.scroll.value()) // self.ROW)
         return i if 0 <= i < len(self.rows) else None
@@ -436,11 +572,34 @@ class PersonTimeline(QWidget):
     def _chip(self, i: int) -> QRectF:
         return QRectF(self.LABEL - 84, self._top(i) + 10, 74, 20)
 
+    def _name_rect(self, i: int) -> QRectF:
+        return QRectF(46, self._top(i) + 7, self.LABEL - 84 - 52, self.ROW - 14)
+
+    def _handle_at(self, i: int, x: float) -> dict | None:
+        """막대 칸에서 끌 수 있는 곳: 자른 곳, 막대 끝."""
+        r = self.rows[i]
+        if r.pid == ALL:
+            return None
+        best = None
+        for s in r.splits:
+            d = abs(self._x(s) - x)
+            if d <= self.HANDLE and (best is None or d < best[0]):
+                best = (d, {"mode": "split", "orig": s})
+        if best:
+            return best[1]
+        for a, b in r.presence:
+            for edge in (a, b):
+                d = abs(self._x(edge) - x)
+                if d <= self.HANDLE and (best is None or d < best[0]):
+                    best = (d, {"mode": "trim", "orig": edge})
+        return best[1] if best else None
+
     # 그리기
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        x0, x1 = self._span()
         p.fillRect(self.rect(), QColor("#1c1c1e"))
         p.fillRect(QRectF(0, 0, self.LABEL, h), QColor("#232325"))
         p.save()
@@ -454,6 +613,11 @@ class PersonTimeline(QWidget):
             p.setPen(QColor("#2c2c2e"))
             p.drawLine(QPointF(0, t + self.ROW - 0.5), QPointF(w, t + self.ROW - 0.5))
             self._paint_label(p, i, r, t)
+        p.setClipRect(QRectF(x0 - 4, self.RULER, x1 - x0 + 8, h - self.RULER))
+        for i, r in enumerate(self.rows):
+            t = self._top(i)
+            if t + self.ROW < self.RULER or t > h:
+                continue
             self._paint_clips(p, r, t)
         if self.n:
             p.setPen(QPen(QColor(255, 255, 255, 45), 1, Qt.PenStyle.DashLine))
@@ -461,18 +625,17 @@ class PersonTimeline(QWidget):
                 x = self._x(c)
                 p.drawLine(QPointF(x, self.RULER), QPointF(x, h))
         d = self._drag
-        if d and d.get("mode") == "range":
+        if d and d["mode"] in ("split", "trim") and "new" in d:
             t = self._top(d["row"])
-            a, b = d["range"]
-            p.setPen(QPen(QColor("#ffd60a"), 1.5))
-            p.setBrush(QColor(255, 214, 10, 45))
-            p.drawRoundedRect(QRectF(self._x(a), t + 3, max(2.0, self._x(b + 1) - self._x(a)), self.ROW - 6), 5, 5)
+            x = self._x(d["new"])
+            p.setPen(QPen(QColor("#ffd60a"), 2))
+            p.drawLine(QPointF(x, t + 2), QPointF(x, t + self.ROW - 2))
         p.restore()
         self._paint_ruler(p)
-        if self.n:
+        if self.n and x0 - 1 <= self._x(self.pos) <= x1 + 1:
             x = self._x(self.pos)
             p.setPen(QPen(QColor("#f2f2f7"), 1.5))
-            p.drawLine(QPointF(x, self.RULER - 6), QPointF(x, h))
+            p.drawLine(QPointF(x, self.RULER - 6), QPointF(x, h - (self.HBAR if self.zoom > 1 else 0)))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor("#f2f2f7"))
             p.drawPolygon([QPointF(x - 6, self.RULER - 12), QPointF(x + 6, self.RULER - 12), QPointF(x, self.RULER - 4)])
@@ -503,7 +666,7 @@ class PersonTimeline(QWidget):
         font.setWeight(QFont.Weight.DemiBold if r.pid == self.current else QFont.Weight.Normal)
         p.setFont(font)
         name = r.name + ("  ⚠" if r.warn else "")
-        area = QRectF(48, t, self.LABEL - 84 - 54, self.ROW)
+        area = self._name_rect(i)
         p.setPen(QColor("#ff9f0a") if r.warn else QColor("#f2f2f7"))
         p.drawText(area, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                    p.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, int(area.width())))
@@ -534,10 +697,12 @@ class PersonTimeline(QWidget):
         if label and rect.width() > 56:
             font = p.font()
             font.setPointSizeF(11)
+            font.setWeight(QFont.Weight.Normal)
             p.setFont(font)
             p.setPen(QColor("#ffffff"))
-            p.drawText(rect.adjusted(7, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       effect_short(effect))
+            x0, _ = self._span()
+            text_rect = QRectF(max(rect.x(), x0) + 7, rect.y(), rect.width() - 11, rect.height())
+            p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, effect_short(effect))
 
     def _paint_clips(self, p: QPainter, r: Row, t: float):
         if not self.n:
@@ -553,24 +718,25 @@ class PersonTimeline(QWidget):
                        "효과를 따로 정하지 않은 모든 인물에 적용되는 기본 효과")
             return
         y, hh = t + 8, self.ROW - 16
-        for a, b in r.presence:
-            self._clip(p, QRectF(self._x(a), y, max(3.0, self._x(b) - self._x(a)), hh), r.effect)
-        for seg in r.segments:
-            for a, b in r.presence:
-                s, e = max(a, seg["start"]), min(b, seg["end"])
-                if e > s:
-                    self._clip(p, QRectF(self._x(s), y, max(3.0, self._x(e) - self._x(s)), hh), seg["effect"])
-            color = QColor(EFFECT_COLORS.get(seg["effect"]["type"], "#8e8e93"))
-            box = QRectF(self._x(seg["start"]), t + 3, max(3.0, self._x(seg["end"]) - self._x(seg["start"])), self.ROW - 6)
-            p.setPen(QPen(color, 1.2))
+        bounds = [0, *r.splits, self.n]
+        for a, b in r.presence:  # 막대를 자른 곳에서 나눠, 조각마다 그 조각의 효과 색으로
+            cuts = [a, *[s for s in bounds if a < s < b], b]
+            for s, e in zip(cuts, cuts[1:]):
+                mid = (s + e) // 2
+                eff = next((seg["effect"] for seg in reversed(r.segments) if seg["start"] <= mid < seg["end"]), r.effect)
+                self._clip(p, QRectF(self._x(s) + (1 if s != a else 0), y,
+                                     max(3.0, self._x(e) - self._x(s) - (1 if s != a else 0)), hh), eff)
+        if r.pid == self.current and self.piece:  # 선택한 조각: 파이널컷처럼 노란 테두리
+            a, b = self.piece
+            p.setPen(QPen(QColor("#ffd60a"), 2))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(box, 5, 5)
-            if not any(min(b, seg["end"]) > max(a, seg["start"]) for a, b in r.presence) and box.width() > 70:
-                p.setPen(color)  # 이 구간에 등장하지 않으면 테두리만 보이므로 이름을 적어 둠
-                p.drawText(box.adjusted(7, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter,
-                           effect_short(seg["effect"]) + " (등장 안 함)")
+            p.drawRoundedRect(QRectF(self._x(a), t + 4, max(3.0, self._x(b) - self._x(a)), self.ROW - 8), 5, 5)
+        p.setPen(QPen(QColor("#ffd60a"), 1.5))
+        for s in r.splits:  # 자른 곳
+            x = self._x(s)
+            p.drawLine(QPointF(x, t + 3), QPointF(x, t + self.ROW - 3))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#ffd60a"))
+        p.setBrush(QColor("#ff9f0a"))
         for f in r.review:
             x = self._x(f)
             p.drawPolygon([QPointF(x, t + self.ROW - 10), QPointF(x - 4.5, t + self.ROW - 2),
@@ -591,84 +757,196 @@ class PersonTimeline(QWidget):
         if not self.n:
             return
         x0, x1 = self._span()
-        secs = self.n / self.fps
-        step = next((s for s in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800) if secs / s <= (x1 - x0) / 80), 3600)
-        t = 0.0
-        while t <= secs:
+        p.save()
+        p.setClipRect(QRectF(x0 - 2, 0, x1 - x0 + 40, self.RULER))
+        vis_secs = self._visible() / self.fps
+        step = next((s for s in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800)
+                     if vis_secs / s <= (x1 - x0) / 80), 3600)
+        t = (int(self.offset / self.fps / step)) * step
+        end = (self.offset + self._visible()) / self.fps
+        while t <= end + step:
             x = self._x(t * self.fps)
             p.setPen(QColor("#636366"))
             p.drawLine(QPointF(x, self.RULER - 7), QPointF(x, self.RULER - 1))
             p.setPen(QColor("#aeaeb2"))
-            p.drawText(QPointF(x + 4, 15), f"{int(t // 60)}:{int(t % 60):02d}")
+            label = f"{int(t // 60)}:{t % 60:04.1f}" if step < 1 else f"{int(t // 60)}:{int(t % 60):02d}"
+            p.drawText(QPointF(x + 4, 15), label)
             t += step
         if self.mark_in is not None and self.mark_out is not None:
             a, b = sorted((self.mark_in, self.mark_out))
             p.fillRect(QRectF(self._x(a), self.RULER - 5, max(2.0, self._x(b + 1) - self._x(a)), 4), QColor("#ffd60a"))
+        p.restore()
 
     # 마우스
     def mousePressEvent(self, e):
-        if not self.n and not self.rows:
+        if not self.rows:
             return
+        self._finish_rename()
         pos = e.position()
         if pos.y() < self.RULER:
-            self._drag = {"mode": "seek"}
-            self.seek.emit(self._frame_at(pos.x()))
+            if pos.x() > self.LABEL:
+                self._drag = {"mode": "seek"}
+                self.seek.emit(self._frame_at(pos.x()))
             return
         i = self._row_at(pos.y())
         if i is None:
             return
         r = self.rows[i]
         gp = e.globalPosition().toPoint()
+        in_label = pos.x() < self.LABEL
         if e.button() == Qt.MouseButton.RightButton:
             if r.pid not in self.picked:
                 self.person_clicked.emit(r.pid, False)
-            self.context_menu.emit(r.pid, gp)
+            if in_label or r.pid == ALL:
+                self.context_menu.emit(r.pid, gp)
+            else:
+                f = self._frame_at(pos.x())
+                self.piece_clicked.emit(r.pid, f)
+                self.piece_menu.emit(r.pid, f, gp)
             return
-        if pos.x() < self.LABEL:
+        if in_label:
             multi = bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
             self.person_clicked.emit(r.pid, multi)
             chip = self._chip(i)
             if chip.contains(pos):
                 self.effect_menu.emit(r.pid, self.mapToGlobal(chip.bottomLeft().toPoint()))
             return
+        handle = self._handle_at(i, pos.x())
+        if handle:
+            self._drag = {**handle, "row": i}
+            self.person_clicked.emit(r.pid, False)
+            return
+        f = self._frame_at(pos.x())
         self.person_clicked.emit(r.pid, False)
-        self._drag = {"mode": "press", "row": i, "x0": pos.x(), "f0": self._frame_at(pos.x())}
-        self.seek.emit(self._frame_at(pos.x()))
+        self.piece_clicked.emit(r.pid, f)
+        self._drag = {"mode": "seek"}
+        self.seek.emit(f)
+
+    def mouseDoubleClickEvent(self, e):
+        i = self._row_at(e.position().y())
+        if i is not None and self.rows[i].pid != ALL and self._name_rect(i).contains(e.position()):
+            self.start_rename(i)
+
+    def start_rename(self, i: int):
+        r = self.rows[i]
+        self._edit_pid = r.pid
+        self.editor.setGeometry(self._name_rect(i).toRect())
+        self.editor.setText(r.name)
+        self.editor.show()
+        self.editor.setFocus()
+        self.editor.selectAll()
+
+    def _finish_rename(self):
+        if self._edit_pid is None:
+            return
+        pid, self._edit_pid = self._edit_pid, None
+        text = self.editor.text().strip()
+        self.editor.hide()
+        if text:
+            self.renamed.emit(pid, text)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape and self._edit_pid is not None:
+            self._edit_pid = None
+            self.editor.hide()
+            return
+        super().keyPressEvent(e)
 
     def mouseMoveEvent(self, e):
         pos = e.position()
         d = self._drag
         if not d:
             i = self._row_at(pos.y())
-            self.setToolTip("클릭해서 효과 바꾸기" if i is not None and self._chip(i).contains(pos) else
-                            "옆으로 끌면 그 구간만 다른 효과" if i is not None and pos.x() > self.LABEL
-                            and self.rows[i].pid != ALL else "")
+            handle = self._handle_at(i, pos.x()) if i is not None and pos.x() > self.LABEL else None
+            self.setCursor(Qt.CursorShape.SizeHorCursor if handle else Qt.CursorShape.ArrowCursor)
+            tip = ""
+            if i is not None and self._chip(i).contains(pos):
+                tip = "클릭해서 효과 바꾸기"
+            elif handle:
+                tip = "좌우로 끌어 길이 조절"
+            elif i is not None and pos.x() < self.LABEL and self.rows[i].pid != ALL:
+                tip = "더블클릭해서 이름 바꾸기"
+            self.setToolTip(tip)
             return
         f = self._frame_at(pos.x())
         if d["mode"] == "seek":
             self.seek.emit(f)
-        elif d["mode"] in ("press", "range") and self.rows[d["row"]].pid != ALL:
-            if d["mode"] == "press" and abs(pos.x() - d["x0"]) > 5:
-                d["mode"] = "range"
-            if d["mode"] == "range":
-                d["range"] = (min(d["f0"], f), max(d["f0"], f))
-                self.update()
+        else:
+            d["new"] = f
+            self.update()
 
     def mouseReleaseEvent(self, e):
         d, self._drag = self._drag, None
-        if d and d["mode"] == "range":
-            a, b = d["range"]
+        if not d or "new" not in d or d["new"] == d["orig"]:
             self.update()
-            if b > a:
-                self.range_picked.emit(self.rows[d["row"]].pid, a, b + 1, e.globalPosition().toPoint())
+            return
+        pid = self.rows[d["row"]].pid
+        if d["mode"] == "split":
+            self.split_moved.emit(pid, d["orig"], d["new"])
+        elif d["mode"] == "trim":
+            self.trimmed.emit(pid, d["orig"], d["new"])
+        self.update()
 
-    def wheelEvent(self, e):
-        if self.scroll.isVisible():
-            self.scroll.setValue(self.scroll.value() - e.angleDelta().y() // 2)
+
+class ValueSlider(QWidget):
+    """슬라이더 + 값 표시."""
+
+    valueChanged = Signal(int)
+
+    def __init__(self, minimum: int, maximum: int, value: int, suffix: str = "", step: int = 1):
+        super().__init__()
+        self.slider = QSlider(Qt.Orientation.Horizontal, minimum=minimum, maximum=maximum, value=value,
+                              singleStep=step, pageStep=step * 5)
+        self.text = QLabel()
+        self.text.setObjectName("muted")
+        self.text.setMinimumWidth(42)
+        self.text.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.suffix = suffix
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.slider, 1)
+        lay.addWidget(self.text)
+        self.slider.valueChanged.connect(self._on)
+        self._show(value)
+
+    def _show(self, v: int):
+        self.text.setText(f"{v}{self.suffix}")
+
+    def _on(self, v: int):
+        self._show(v)
+        self.valueChanged.emit(v)
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def setValue(self, v: int):
+        self.slider.blockSignals(True)
+        self.slider.setValue(v)
+        self.slider.blockSignals(False)
+        self._show(self.slider.value())
+
+
+@lru_cache(maxsize=8)
+def shape_icon(shape: str, size: int = 22) -> QIcon:
+    pix = QPixmap(size * 2, size * 2)
+    pix.setDevicePixelRatio(2)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor("#f2f2f7"), 1.6))
+    r = QRectF(3, 5, size - 6, size - 10)
+    if shape == "ellipse":
+        p.drawEllipse(r)
+    elif shape == "rounded":
+        p.drawRoundedRect(r, 5, 5)
+    else:
+        p.drawRect(r)
+    p.end()
+    return QIcon(pix)
 
 
 class EffectPicker(QWidget):
-    """효과를 그림 버튼으로 고르고, 아래에서 세부 조절. allow_inherit이면 '기본 따름'(None) 가능."""
+    """효과를 그림 버튼으로 고르고, 아래에서 슬라이더로 세부 조절. allow_inherit이면 '기본 따름'(None) 가능."""
 
     changed = Signal()
 
@@ -678,17 +956,19 @@ class EffectPicker(QWidget):
         self._key = "blur"
         self.image_path = ""
         self.color = "#000000"
+        self._debounce = QTimer(self, singleShot=True, interval=120)  # 슬라이더를 끄는 동안 너무 자주 저장하지 않게
+        self._debounce.timeout.connect(self.changed)
 
         grid = QGridLayout()
         grid.setSpacing(6)
         grid.setContentsMargins(0, 0, 0, 0)
         self.group = QButtonGroup(self)
         self.btns: dict[str, QToolButton] = {}
-        for i, (key, label) in enumerate(PRESETS):
+        for i, (key, label_) in enumerate(PRESETS):
             b = QToolButton()
             b.setObjectName("preset")
             b.setCheckable(True)
-            b.setText(label)
+            b.setText(label_)
             b.setIcon(preset_icon(key))
             b.setIconSize(QSize(30, 30))
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
@@ -699,24 +979,49 @@ class EffectPicker(QWidget):
             self.btns[key] = b
             grid.addWidget(b, i // 4, i % 4)
 
-        self.strength = QSpinBox(minimum=5, maximum=100, value=30)
-        self.blocks = QSpinBox(minimum=2, maximum=40, value=8)
+        # 내 이미지 보관함
+        self.library = QWidget()
+        self.lib_grid = QGridLayout(self.library)
+        self.lib_grid.setContentsMargins(0, 0, 0, 0)
+        self.lib_grid.setSpacing(6)
+        self.lib_group = QButtonGroup(self)
+
+        self.strength = ValueSlider(5, 100, 30)
+        self.blocks = ValueSlider(2, 40, 8)
         self.color_btn = QPushButton("■ #000000")
-        self.image_btn = QPushButton("이미지 선택…")
-        self.sticker = QComboBox()  # 예전 코드 호환용 (화면에는 안 보임)
-        self.shape = QComboBox()
-        for label, v in SHAPE_CHOICES:
-            self.shape.addItem(label, v)
-        self.feather = QSpinBox(minimum=0, maximum=50, value=0, suffix="%")
+        self.shape_btns: dict[str, QToolButton] = {}
+        shapes = QWidget()
+        sl = QHBoxLayout(shapes)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(4)
+        self.shape_group = QButtonGroup(self)
+        for label_, v in SHAPE_CHOICES:
+            b = QToolButton()
+            b.setObjectName("seg")
+            b.setCheckable(True)
+            b.setIcon(shape_icon(v))
+            b.setText(label_)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.clicked.connect(lambda _=False: self.changed.emit())
+            self.shape_group.addButton(b)
+            self.shape_btns[v] = b
+            sl.addWidget(b)
+        self.shape_btns["rect"].setChecked(True)
+        self.feather = ValueSlider(0, 50, 0, "%")
         self.feather.setToolTip("가장자리를 부드럽게 흐리는 정도. 얼굴은 항상 다 덮입니다")
-        self.scale = QSpinBox(minimum=50, maximum=300, value=100, singleStep=10, suffix="%")
+        self.scale = ValueSlider(50, 300, 100, "%", step=5)
         self.scale.setToolTip("가리는 영역 크기 (100% = 이마·턱까지)")
+        self.under = QCheckBox("투명한 틈으로 얼굴이 보이면 흐리기")
         self.form = QFormLayout()
         self.form.setContentsMargins(0, 10, 0, 0)
+        self.form.setVerticalSpacing(10)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        for label, w in (("강도", self.strength), ("블록 수", self.blocks), ("색", self.color_btn),
-                         ("이미지", self.image_btn), ("모양", self.shape), ("가장자리", self.feather), ("크기", self.scale)):
-            lab = QLabel(label)
+        self._shapes = shapes
+        for label_, w in (("강도", self.strength), ("블록 수", self.blocks), ("색", self.color_btn),
+                          ("이미지", self.library), ("모양", shapes), ("가장자리", self.feather),
+                          ("크기", self.scale), ("", self.under)):
+            lab = QLabel(label_)
             lab.setObjectName("muted")
             self.form.addRow(lab, w)
 
@@ -726,33 +1031,92 @@ class EffectPicker(QWidget):
         lay.addLayout(self.form)
 
         for w in (self.strength, self.blocks, self.feather, self.scale):
-            w.valueChanged.connect(self.changed)
-        self.shape.currentIndexChanged.connect(self.changed)
+            w.valueChanged.connect(lambda _v: self._debounce.start())
+        self.under.toggled.connect(lambda _on: self.changed.emit())
         self.color_btn.clicked.connect(self._pick_color)
-        self.image_btn.clicked.connect(lambda: self._pick_image() and self.changed.emit())
         self.set_inherit_allowed(allow_inherit)
+        self._fill_library()
         self._sync()
 
     @property
     def key(self) -> str:
         return self._key
 
-    def set_inherit_allowed(self, on: bool):
+    def set_inherit_allowed(self, on: bool, label_: str = "기본 따름"):
         self.allow_inherit = on
         self.btns["inherit"].setVisible(on)
+        self.btns["inherit"].setText(label_)
 
     def _sync(self):
         k = self._key
         self.btns[k].setChecked(True)
         rows = {self.strength: k == "blur", self.blocks: k == "mosaic", self.color_btn: k == "solid",
-                self.image_btn: k == "image", self.shape: k in SHAPED, self.feather: k in SHAPED,
-                self.scale: k not in ("none", "inherit")}
+                self.library: k == "image", self._shapes: k in SHAPED, self.feather: k in SHAPED,
+                self.scale: k not in ("none", "inherit"), self.under: k in ("smile", "heart", "image")}
         for w, on in rows.items():
             self.form.setRowVisible(w, on)
 
+    # 보관함
+    def _fill_library(self):
+        from .. import library
+        while self.lib_grid.count():
+            w = self.lib_grid.takeAt(0).widget()
+            if w:
+                self.lib_group.removeButton(w) if isinstance(w, QToolButton) else None
+                w.deleteLater()
+        items = library.images()
+        for i, path in enumerate(items):
+            b = QToolButton()
+            b.setObjectName("thumb")
+            b.setCheckable(True)
+            b.setIcon(QIcon(QPixmap(str(path)).scaled(88, 88, Qt.AspectRatioMode.KeepAspectRatio,
+                                                      Qt.TransformationMode.SmoothTransformation)))
+            b.setIconSize(QSize(40, 40))
+            b.setFixedSize(52, 52)
+            b.setToolTip(f"{path.name}\n우클릭: 보관함에서 지우기")
+            b.setChecked(bool(self.image_path) and Path(self.image_path).name == path.name)
+            b.clicked.connect(lambda _=False, pth=str(path): self._use_image(pth))
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            b.customContextMenuRequested.connect(lambda _pos, pth=str(path): self._remove_image(pth))
+            self.lib_group.addButton(b)
+            self.lib_grid.addWidget(b, i // 5, i % 5)
+        add = QToolButton()
+        add.setObjectName("thumb")
+        add.setText("＋")
+        add.setFixedSize(52, 52)
+        add.setToolTip("이미지 올리기 (보관함에 저장되어 다음에도 바로 쓸 수 있어요)")
+        add.clicked.connect(self._pick_image)
+        n = len(items)
+        self.lib_grid.addWidget(add, n // 5, n % 5)
+
+    def _use_image(self, path: str):
+        self.image_path = path
+        self._key = "image"
+        self._sync()
+        self._fill_library()
+        self.changed.emit()
+
+    def _remove_image(self, path: str):
+        from .. import library
+        library.remove(path)
+        self._fill_library()
+
+    def _pick_image(self) -> bool:
+        from .. import library
+        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 올리기", "", "이미지 (*.png *.jpg *.jpeg *.webp)")
+        if not path:
+            return False
+        self._use_image(str(library.add(path)))
+        return True
+
     def _on_click(self, key: str):
-        if key == "image" and not self.image_path and not self._pick_image():
-            self._sync()  # 취소: 원래 버튼으로
+        if key == "image" and not self.image_path:
+            from .. import library
+            items = library.images()
+            if items:  # 보관함에 있으면 가장 최근 것을 바로 씀
+                self._use_image(str(items[0]))
+            elif not self._pick_image():
+                self._sync()  # 취소: 원래 버튼으로
             return
         self._key = key
         self._sync()
@@ -764,16 +1128,6 @@ class EffectPicker(QWidget):
             self.color = c.name()
             self.color_btn.setText(f"■ {self.color}")
             self.changed.emit()
-
-    def _pick_image(self) -> bool:
-        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 선택", "", "이미지 (*.png *.jpg *.jpeg *.webp)")
-        if path:
-            self.image_path = path
-            self.image_btn.setText(path.rsplit("/", 1)[-1])
-            if self._key != "image":
-                self._key = "image"
-                self._sync()
-        return bool(path)
 
     def effect(self) -> dict | None:
         k = self._key
@@ -788,18 +1142,20 @@ class EffectPicker(QWidget):
              "heart": lambda: {"type": "sticker", "value": "heart"},
              "image": lambda: {"type": "image", "value": self.image_path}}[k]()
         if k in SHAPED:
-            if self.shape.currentData() != "rect":
-                e["shape"] = self.shape.currentData()
+            shape = next(v for v, b in self.shape_btns.items() if b.isChecked())
+            if shape != "rect":
+                e["shape"] = shape
             if self.feather.value():
                 e["feather"] = float(self.feather.value())
         if self.scale.value() != 100:
             e["scale"] = float(self.scale.value())
+        if k in ("smile", "heart", "image") and self.under.isChecked() != (e["type"] == "sticker"):
+            e["under"] = self.under.isChecked()
         return e
 
     def set_effect(self, e: dict | None):
-        widgets = (self.strength, self.blocks, self.shape, self.feather, self.scale)
-        for w in widgets:
-            w.blockSignals(True)
+        self._debounce.stop()
+        self.under.blockSignals(True)
         self._key = preset_of(e) if (e is not None or self.allow_inherit) else "blur"
         e = e or {}
         v = e.get("value")
@@ -812,13 +1168,14 @@ class EffectPicker(QWidget):
             self.color_btn.setText(f"■ {v}")
         elif e.get("type") == "image" and v:
             self.image_path = v
-            self.image_btn.setText(v.rsplit("/", 1)[-1])
-        self.shape.setCurrentIndex(max(0, self.shape.findData(e.get("shape", "rect"))))
+        self.shape_btns[e.get("shape", "rect")].setChecked(True)
         self.feather.setValue(int(e.get("feather", 0)))
         self.scale.setValue(int(e.get("scale", 100)))
+        self.under.setChecked(e.get("under", e.get("type") == "sticker"))
+        if e.get("type") == "image":
+            self._fill_library()
         self._sync()
-        for w in widgets:
-            w.blockSignals(False)
+        self.under.blockSignals(False)
 
 
 def label(text: str, muted: bool = False) -> QLabel:

@@ -134,7 +134,7 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
     persons: dict[int, Person] = {}
     for tid, pid in sorted(person_of.items()):
         tracks[tid].person = pid
-        persons.setdefault(pid, Person(name=f"인물 {pid}", tracks=[], thumb=[]))
+        persons.setdefault(pid, Person(name=Project.default_name(pid), tracks=[], thumb=[]))
         persons[pid].tracks.append(tid)
     for pid, p in persons.items():
         # 대표 얼굴: 점수 x 크기가 가장 큰 자동 검출 상자
@@ -170,7 +170,7 @@ def write_person_sheet(project: Project) -> Path:
         crop = face_crop(frames[int(p.thumb[0])], p.thumb[1:])
         cv2.imwrite(str(faces_dir / f"{pid}.jpg"), crop)
         secs = len(project.person_frames(pid)) / project.video.fps
-        title = f"#{pid}  {secs:.1f}s" + ("  ?" if project.needs_review(pid) else "")
+        title = f"#{pid + 1}  {secs:.1f}s" + ("  ?" if project.needs_review(pid) else "")
         crops.append((title, effect_label(project.effect_for(pid)), crop))
     path = project.dir / "persons.jpg"
     if crops:

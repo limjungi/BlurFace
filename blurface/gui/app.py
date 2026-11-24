@@ -14,10 +14,10 @@ from pathlib import Path
 import cv2
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-                               QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout, QWidget)
+                               QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from ..effects import grow, shrink
 from ..persons import face_crop
@@ -26,13 +26,13 @@ from ..render import compose
 from ..video import probe
 from .source import FrameSource
 from .theme import apply_theme
-from .widgets import (ALL, PRESETS, arrow_icon, EffectPicker, PersonTimeline, Row, VideoView, effect_text, preset_effect,
+from .widgets import (ALL, PRESETS, arrow_icon, EffectPicker, PersonTimeline, Row, VideoView, preset_effect,
                       preset_icon, preset_of)
 from .workers import AnalyzeWorker, ExportWorker
 
 VIDEO_EXT = "영상 (*.mp4 *.mov *.m4v *.mkv *.avi *.webm)"
 UNDO_LIMIT = 200
-HINT = "Space 재생 · ←/→ 프레임 · 인물 줄을 옆으로 끌면 구간 효과 · 우클릭 메뉴 · B 상자 편집 · N 확인할 곳"
+HINT = "Space 재생 · ⌘B 자르기 · 핀치/⌘+스크롤 확대 · F 전체 화면 · B 상자 편집 · N 확인할 곳"
 
 
 def fmt_time(sec: float) -> str:
@@ -68,6 +68,8 @@ class MainWindow(QMainWindow):
         self.selected: int | None = None  # 선택한 인물 (ALL = 모든 인물)
         self.picked: set[int] = set()  # ⌘-클릭으로 여러 명 고른 인물
         self.sel_track: int | None = None  # 미리보기에서 선택한 상자(트랙)
+        self.piece: tuple[int, int] | None = None  # 선택한 조각 (자른 인물 줄의 한 부분)
+        self._all_keep = False  # '모든 인물' 효과를 바꿀 때 따로 정한 사람은 그대로 두기로 했는지
         self.review: list[tuple[int, int, str]] = []
         self.worker = None
         self._threads: set = set()  # 스레드가 완전히 끝날 때까지 참조 유지 (먼저 지우면 앱이 죽음)
@@ -101,6 +103,13 @@ class MainWindow(QMainWindow):
         self.act_boxes = QAction("상자 편집", self, checkable=True, shortcut="B", triggered=self._toggle_boxes)
         self.act_boxes.setToolTip("얼굴 상자를 보이게 하고 옮기기·크기 조절·새로 그리기 (B)")
         self.act_next = QAction("확인할 곳 ▸", self, shortcut="N", triggered=self.next_review)
+        self.act_blade = QAction("자르기", self, shortcut="Ctrl+B", triggered=self.blade)
+        self.act_blade.setToolTip("선택한 인물 줄을 재생 위치에서 자르기 (⌘B). 자른 조각마다 다른 효과를 줄 수 있어요")
+        self.act_full = QAction("전체 화면", self, shortcut="F", triggered=self.toggle_fullscreen)
+        self.act_zoom_in = QAction("확대", self, shortcut="Ctrl+=", triggered=lambda: self.timeline.zoom_by(1.5))
+        self.act_zoom_out = QAction("축소", self, shortcut="Ctrl+-", triggered=lambda: self.timeline.zoom_by(1 / 1.5))
+        for a in (self.act_full, self.act_zoom_in, self.act_zoom_out):
+            self.addAction(a)
         self.act_next.setToolTip("자동 추적이 틀렸을 수 있는 다음 위치로 (N)")
         self.act_reanalyze = QAction("다시 분석", self, triggered=self.reanalyze)
         self.act_restore = QAction("이전 상태로", self, triggered=self.restore_dialog)
@@ -112,7 +121,7 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
             tb.widgetForAction(a).setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         tb.addSeparator()
-        for a in (self.act_boxes, self.act_next):
+        for a in (self.act_blade, self.act_boxes, self.act_next):
             tb.addAction(a)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -143,6 +152,13 @@ class MainWindow(QMainWindow):
         controls.addSpacing(14)
         controls.addWidget(self.total_label)
         controls.addStretch()
+        self.full_btn = QToolButton()
+        self.full_btn.setText("⤢")
+        self.full_btn.setToolTip("전체 화면 (F) · Esc로 나가기")
+        self.full_btn.setObjectName("play")
+        self.full_btn.setFixedSize(30, 30)
+        self.full_btn.clicked.connect(self.toggle_fullscreen)
+        controls.addWidget(self.full_btn)
         viewer = QWidget()
         viewer.setObjectName("viewer")
         vv = QVBoxLayout(viewer)
@@ -156,12 +172,17 @@ class MainWindow(QMainWindow):
         self.timeline.seek.connect(self.seek)
         self.timeline.person_clicked.connect(self.select_person)
         self.timeline.effect_menu.connect(self._effect_menu)
-        self.timeline.range_picked.connect(self._on_range)
         self.timeline.context_menu.connect(self._context_menu)
+        self.timeline.piece_clicked.connect(self._on_piece_clicked)
+        self.timeline.piece_menu.connect(self._piece_menu)
+        self.timeline.split_moved.connect(self._on_split_moved)
+        self.timeline.trimmed.connect(self._on_trimmed)
+        self.timeline.renamed.connect(self.rename)
 
         top = QSplitter(Qt.Orientation.Horizontal)
         top.addWidget(viewer)
-        top.addWidget(self._build_inspector())
+        self.inspector = self._build_inspector()
+        top.addWidget(self.inspector)
         top.setSizes([1080, 360])
         top.setStretchFactor(0, 1)
         main = QSplitter(Qt.Orientation.Vertical)
@@ -191,25 +212,22 @@ class MainWindow(QMainWindow):
         self.picker.changed.connect(self._on_picker)
         v.addWidget(self.picker)
 
-        # 구간 효과
+        # 조각(자른 구간)
         self.seg_section = QWidget()
         sv = QVBoxLayout(self.seg_section)
         sv.setContentsMargins(0, 0, 0, 0)
-        sv.addWidget(section("구간 효과"))
-        sv.addWidget(muted("타임라인에서 이 인물 줄을 옆으로 끌면 그 시간만 다른 효과를 줄 수 있어요."))
-        self.seg_table = QTableWidget(0, 3)
-        self.seg_table.setHorizontalHeaderLabels(["시작", "끝", "효과"])
-        self.seg_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.seg_table.verticalHeader().setVisible(False)
-        self.seg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.seg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.seg_table.setMaximumHeight(150)
-        self.seg_table.cellDoubleClicked.connect(lambda r, _c: self._goto_segment(r))
-        self.seg_del = QPushButton("선택한 구간 삭제")
-        self.seg_del.clicked.connect(self._delete_segment)
-        sv.addWidget(self.seg_table)
-        sv.addWidget(self.seg_del)
-        v.addWidget(self.seg_section)
+        self.piece_label = muted()
+        sv.addWidget(self.piece_label)
+        row = QHBoxLayout()
+        self.piece_whole_btn = QPushButton("인물 전체 효과로")
+        self.piece_whole_btn.setToolTip("조각 선택을 풀고 이 인물 전체 효과를 고칩니다")
+        self.piece_whole_btn.clicked.connect(lambda: self.select_piece(None))
+        self.unsplit_btn = QPushButton("자른 곳 모두 없애기")
+        self.unsplit_btn.clicked.connect(self._clear_splits)
+        row.addWidget(self.piece_whole_btn)
+        row.addWidget(self.unsplit_btn)
+        sv.addLayout(row)
+        v.insertWidget(v.indexOf(self.picker) - 1, self.seg_section)
 
         # 선택한 상자
         self.box_section = QWidget()
@@ -291,7 +309,7 @@ class MainWindow(QMainWindow):
                         ("Shift+Right", lambda: self.step(round(self.fps))),
                         ("I", self.mark_in), ("O", self.mark_out),
                         ("Backspace", lambda: self._track_edit("track")), ("Delete", lambda: self._track_edit("track")),
-                        ("S", lambda: self._track_edit("split"))]:
+                        ("S", lambda: self._track_edit("split")), ("Escape", self._escape)]:
             QShortcut(QKeySequence(key), self, activated=fn)
 
     def _update_enabled(self):
@@ -305,6 +323,7 @@ class MainWindow(QMainWindow):
         self.act_redo.setEnabled(has_project and bool(self._redo))
         self.act_next.setEnabled(has_project and bool(self.review))
         self.act_boxes.setEnabled(has_project)
+        self.act_blade.setEnabled(has_project)
         has_track = has_project and self.sel_track is not None and self.sel_track in self.project.tracks
         for b in self.track_btns:
             b.setEnabled(has_track)
@@ -341,6 +360,7 @@ class MainWindow(QMainWindow):
         self.selected = None
         self.picked = set()
         self.sel_track = None
+        self.piece = None
         self.review = []
         self.n_frames, self.fps = max(1, info.n_frames), info.fps
         self.frame = 0
@@ -396,6 +416,10 @@ class MainWindow(QMainWindow):
         self.pause()
         w = AnalyzeWorker(path)
         w.done.connect(self._on_analyzed)
+        self.view.set_busy("분석 준비 중…")
+        w.progress.connect(lambda i, total: self.view.set_busy("얼굴 찾는 중", i / total if total else None))
+        for sig in (w.done, w.failed, w.cancelled):
+            sig.connect(lambda *_: self.view.set_busy(None))
         self._run_worker(w, "얼굴 찾는 중… (분석하는 동안에도 영상을 볼 수 있습니다)",
                          prep="분석 준비 중… (얼굴 인식 모델 불러오는 중, 몇 초 걸립니다)")
 
@@ -407,6 +431,7 @@ class MainWindow(QMainWindow):
     def _set_project(self, project: Project):
         self.project = project
         self.sel_track = None
+        self.piece = None
         self.picked = set()
         if self.selected not in project.persons:
             self.selected = ALL
@@ -478,22 +503,22 @@ class MainWindow(QMainWindow):
         for pid, person in sorted(p.persons.items()):
             rows.append(Row(pid, person.name, p.effect_for(pid), person.effect is None,
                             self._runs(p.person_frames(pid)), person.segments, review.get(pid, []),
-                            p.needs_review(pid), self._thumb(pid)))
-        self.timeline.set_rows(rows, self.selected, self.picked)
+                            p.needs_review(pid), self._thumb(pid), list(person.splits)))
+        self.timeline.set_rows(rows, self.selected, self.picked, self.piece)
 
     def _refresh_inspector(self):
         p, sel = self.project, self.selected
         is_person = p is not None and sel in p.persons
-        for w in (self.name_edit, self.seg_section, self.person_actions):
+        for w in (self.name_edit, self.person_actions):
             w.setVisible(is_person)
         self.picker.setVisible(p is not None and sel is not None)
+        self.insp_sub.setVisible(is_person or p is None)  # '모든 인물'은 설명 없이
+        self.seg_section.setVisible(is_person and bool(p.persons[sel].splits))
         if p is None:
             self.insp_title.setText("BlurFace")
             self.insp_sub.setText("영상을 열거나 창에 끌어다 놓으면 얼굴을 자동으로 찾아 가려 줍니다.")
         elif not is_person:
             self.insp_title.setText("모든 인물")
-            self.insp_sub.setText("효과를 따로 정하지 않은 모든 사람에게 적용되는 기본 효과입니다. "
-                                  "사람마다 다르게 하려면 아래 타임라인에서 인물을 고르세요.")
             self.picker.set_inherit_allowed(False)
             self.picker.set_effect(p.default_effect)
         else:
@@ -501,12 +526,20 @@ class MainWindow(QMainWindow):
             secs = len(p.person_frames(sel)) / p.video.fps
             self.insp_title.setText(person.name)
             warn = "\n⚠ 점수가 낮거나 아주 짧게 나와서 얼굴이 아닐 수 있어요." if p.needs_review(sel) else ""
-            self.insp_sub.setText(f"#{sel} · 등장 {secs:.1f}초{warn}")
+            self.insp_sub.setText(f"#{sel + 1} · 등장 {secs:.1f}초{warn}")
             if not self.name_edit.hasFocus():
                 self.name_edit.setText(person.name)
-            self.picker.set_inherit_allowed(True)
-            self.picker.set_effect(person.effect)
-            self._fill_segments(person.segments)
+            if self.piece:
+                a, b = self.piece
+                seg = next((x for x in person.segments if x["start"] <= a and b <= x["end"]), None)
+                self.piece_label.setText(f"선택한 조각 {fmt_time(p.time_of(a))} ~ {fmt_time(p.time_of(b))}의 효과")
+                self.picker.set_inherit_allowed(True, "인물 효과 따름")
+                self.picker.set_effect(seg["effect"] if seg else None)
+            else:
+                self.piece_label.setText(f"인물 전체 효과 · 조각 {len(p.pieces(sel))}개 (막대를 눌러 조각 선택)")
+                self.picker.set_inherit_allowed(True)
+                self.picker.set_effect(person.effect)
+            self.piece_whole_btn.setVisible(self.piece is not None)
             n = len(self.picked)
             self.merge_btn.setText(f"선택한 {n}명을 한 사람으로 합치기")
             self.merge_btn.setVisible(n >= 2)
@@ -526,15 +559,6 @@ class MainWindow(QMainWindow):
                 runs.append([f, f])
         return [(a, b + 1) for a, b in runs]
 
-    def _fill_segments(self, segments: list[dict]):
-        self.seg_table.setRowCount(len(segments))
-        for r, seg in enumerate(segments):
-            for c, text in enumerate([fmt_time(self.project.time_of(seg["start"])),
-                                      fmt_time(self.project.time_of(seg["end"])), effect_text(seg["effect"])]):
-                self.seg_table.setItem(r, c, QTableWidgetItem(text))
-        self.seg_del.setVisible(bool(segments))
-        self.seg_table.setVisible(bool(segments))
-
     # ---------- 인물 선택 ----------
     def select_person(self, pid: int, multi: bool = False):
         if not self.project:
@@ -547,10 +571,13 @@ class MainWindow(QMainWindow):
                 self.picked = {pid}
         else:
             self.picked = {pid} if pid != ALL else set()
+        if pid != self.selected:
+            self.piece = None
+            self._all_keep = False
         self.selected = pid
         if self.sel_track in self.project.tracks and self.project.tracks[self.sel_track].person != pid and pid != ALL:
             self.sel_track = None
-        self.timeline.set_selection(self.selected, self.picked)
+        self.timeline.set_selection(self.selected, self.picked, self.piece)
         self._refresh_inspector()
         self.refresh_frame()
         self._update_enabled()
@@ -570,14 +597,47 @@ class MainWindow(QMainWindow):
             shutil.copy2(src, dst)
         return {**effect, "value": str(dst)}
 
-    def set_effect(self, pid: int, effect: dict | None):
+    def _overridden(self) -> list[int]:
+        """효과를 따로 정한 인물 (인물 효과나 구간 효과가 있음)."""
+        return [pid for pid, person in self.project.persons.items() if person.effect is not None or person.segments]
+
+    def set_effect(self, pid: int, effect: dict | None, ask: bool = True):
         effect = self._import_asset(effect)
+        p = self.project
         if pid == ALL:
-            if effect:
-                self.project.default_effect = effect
+            if not effect:
+                return
+            over = self._overridden()
+            if over and ask and not self._all_keep:
+                choice = self._ask_all(len(over))
+                if choice == "all":
+                    for opid in over:
+                        person = p.persons[opid]
+                        person.effect, person.segments, person.splits = None, [], []
+                elif choice == "keep":
+                    self._all_keep = True  # 이번에 고르는 동안은 다시 묻지 않음
+                else:
+                    self._refresh_inspector()
+                    return
+            p.default_effect = effect
+        elif self.piece and pid == self.selected:
+            p.set_piece_effect(pid, *self.piece, effect)
         else:
-            self.project.persons[pid].effect = effect
+            p.persons[pid].effect = effect
         self._changed()
+
+    def _ask_all(self, n: int) -> str:
+        """'all' | 'keep' | 'cancel'"""
+        box = QMessageBox(self)
+        box.setWindowTitle("모든 인물에 적용")
+        box.setText(f"{n}명은 따로 정한 효과가 있어요.")
+        box.setInformativeText("모두에게 적용하면 그 사람들의 개별 효과와 구간 효과가 사라집니다.")
+        all_btn = box.addButton("모두에게 적용", QMessageBox.ButtonRole.DestructiveRole)
+        keep_btn = box.addButton("따로 정한 사람은 그대로", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        return "all" if box.clickedButton() is all_btn else "keep" if box.clickedButton() is keep_btn else "cancel"
 
     def _on_picker(self):
         if self.project and self.selected is not None:
@@ -610,35 +670,95 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _=False, k=key: self._apply_preset(pid, k))
         m.exec(pos)
 
-    def _apply_preset(self, pid: int, key: str):
-        e = self._preset(key, self.project.effect_for(pid) if pid != ALL else self.project.default_effect)
-        if e is not False:
-            self.selected = pid
-            self.set_effect(pid, e)
-
-    def _on_range(self, pid: int, a: int, b: int, pos):
-        """인물 줄을 끌어 고른 구간: 그 시간만 다른 효과 / 상자 지우기."""
+    def _apply_preset(self, pid: int, key: str, piece: tuple[int, int] | None = None):
         p = self.project
-        self.timeline.mark_in, self.timeline.mark_out = a, b - 1
-        self.timeline.update()
-        m = QMenu(self)
-        head = m.addAction(f"{fmt_time(p.time_of(a))} ~ {fmt_time(p.time_of(b))} 동안만")
-        head.setEnabled(False)
-        for key, label_ in PRESETS:
-            if key == "inherit":
-                continue
-            m.addAction(preset_icon(key), label_).triggered.connect(
-                lambda _=False, k=key: self._add_range_effect(pid, a, b, k))
-        m.addSeparator()
-        m.addAction("이 구간 얼굴 상자 지우기").triggered.connect(lambda: self._remove_person_range(pid, a, b))
-        m.exec(pos)
-        self.timeline.mark_in = self.timeline.mark_out = None
-        self.timeline.update()
+        prev = p.default_effect if pid == ALL else p.effect_for(pid, piece[0] if piece else None)
+        e = self._preset(key, prev)
+        if e is False:
+            return
+        if pid != self.selected:
+            self.select_person(pid)
+        self.piece = piece
+        self.set_effect(pid, e)
 
-    def _add_range_effect(self, pid: int, a: int, b: int, key: str):
-        e = self._preset(key, self.project.effect_for(pid))
-        if e is not False:
-            self.add_segment(pid, a, b, e)
+    # ---------- 자르기·조각 ----------
+    def blade(self):
+        """선택한 인물 줄을 재생 위치에서 자른다 (파이널컷 ⌘B)."""
+        p = self.project
+        if not p:
+            return
+        if self.selected not in p.persons:
+            self.status_label.setText("자를 인물 줄을 먼저 고르세요 (아래 타임라인에서 이름 클릭)")
+            return
+        if not p.split(self.selected, self.frame):
+            return
+        self.piece = p.piece_at(self.selected, self.frame)
+        self.status_label.setText("잘랐습니다 · 조각을 골라 그 부분만 다른 효과를 줄 수 있어요 (⌘Z로 되돌리기)")
+        self._changed()
+
+    def select_piece(self, piece: tuple[int, int] | None):
+        self.piece = piece
+        self.timeline.set_selection(self.selected, self.picked, piece)
+        self._refresh_inspector()
+
+    def _on_piece_clicked(self, pid: int, frame: int):
+        p = self.project
+        if pid in p.persons and p.persons[pid].splits:
+            self.select_piece(p.piece_at(pid, frame))
+        else:
+            self.select_piece(None)
+
+    def _piece_menu(self, pid: int, frame: int, pos):
+        if pid not in self.project.persons:
+            return
+        p = self.project
+        piece = p.piece_at(pid, frame) if p.persons[pid].splits else None
+        m = QMenu(self)
+        sub = m.addMenu("이 조각 효과" if piece else "효과")
+        for key, label_ in PRESETS:
+            text = label_ if key != "inherit" else ("인물 효과 따름" if piece else "기본 효과 따르기")
+            sub.addAction(preset_icon(key), text).triggered.connect(
+                lambda _=False, k=key: self._apply_preset(pid, k, piece))
+        m.addAction("여기서 자르기 (⌘B)").triggered.connect(lambda: (self.seek(frame), self.blade()))
+        near = [x for x in p.persons[pid].splits if abs(self.timeline._x(x) - self.timeline._x(frame)) < 8]
+        if near:
+            m.addAction("이 자른 곳 없애기").triggered.connect(lambda: self._unsplit(pid, near[0]))
+        if piece:
+            m.addSeparator()
+            m.addAction("이 조각의 얼굴 상자 지우기").triggered.connect(lambda: self._remove_person_range(pid, *piece))
+        m.exec(pos)
+
+    def _unsplit(self, pid: int, frame: int):
+        self.project.unsplit(pid, frame)
+        self.piece = None
+        self._changed()
+
+    def _clear_splits(self):
+        if self.selected in self.project.persons:
+            for x in list(self.project.persons[self.selected].splits):
+                self.project.unsplit(self.selected, x)
+            self.piece = None
+            self._changed()
+
+    def _on_split_moved(self, pid: int, old: int, new: int):
+        keep = self.piece
+        new = self.project.move_split(pid, old, new)
+        if keep:
+            self.piece = self.project.piece_at(pid, keep[0] if keep[0] != old else new)
+        self._changed()
+
+    def _on_trimmed(self, pid: int, old: int, new: int):
+        """막대 끝을 끌어 등장 길이 조절: 줄이면 그 구간 상자를 지우고, 늘리면 지웠던 상자를 되살린다."""
+        p = self.project
+        before = len(p.person_frames(pid))
+        is_start = any(a == old for a, _ in self._runs(p.person_frames(pid)))
+        a, b = sorted((old, new))
+        grow_ = (is_start and new < old) or (not is_start and new > old)
+        for tid in p.persons[pid].tracks:
+            (p.restore_range if grow_ else p.remove_range)(tid, a, b)
+        if grow_ and len(p.person_frames(pid)) == before:
+            self.status_label.setText("더 늘릴 수 없어요. 그 시간에는 찾은 얼굴이 없습니다 (B 상자 편집으로 직접 그려 주세요)")
+        self._changed(track_changed=True)
 
     def add_segment(self, pid: int, a: int, b: int, effect: dict):
         self.project.add_segment(pid, a, b, self._import_asset(effect))
@@ -651,25 +771,12 @@ class MainWindow(QMainWindow):
             self.project.remove_range(tid, a, b)
         self._changed(track_changed=True)
 
-    def _delete_segment(self):
-        rows = sorted({i.row() for i in self.seg_table.selectedIndexes()}, reverse=True)
-        if not rows or self.selected not in self.project.persons:
-            return
-        segs = self.project.persons[self.selected].segments
-        for r in rows:
-            del segs[r]
-        self._changed()
-
-    def _goto_segment(self, row: int):
-        if self.selected in self.project.persons:
-            self.seek(self.project.persons[self.selected].segments[row]["start"])
-
     def _context_menu(self, pid: int, pos):
         if pid == ALL or not self.project:
             return
         m = QMenu(self)
         m.addAction("효과 바꾸기…").triggered.connect(lambda: self._effect_menu(pid, pos))
-        m.addAction("이름 바꾸기…").triggered.connect(lambda: self._rename(pid))
+        m.addAction("이름 바꾸기").triggered.connect(lambda: self._rename(pid))
         m.addAction("처음 등장한 곳으로").triggered.connect(self._goto_person)
         m.addSeparator()
         targets = sorted(self.picked) if pid in self.picked and len(self.picked) >= 2 else [pid]
@@ -682,14 +789,18 @@ class MainWindow(QMainWindow):
         m.exec(pos)
 
     def _rename(self, pid: int):
-        name, ok = QInputDialog.getText(self, "이름 바꾸기", "이름:", text=self.project.persons[pid].name)
-        if ok and name.strip():
-            self.project.persons[pid].name = name.strip()
+        i = next((i for i, r in enumerate(self.timeline.rows) if r.pid == pid), None)
+        if i is not None:
+            self.timeline.start_rename(i)
+
+    def rename(self, pid: int, name: str):
+        if pid in self.project.persons and name and name != self.project.persons[pid].name:
+            self.project.persons[pid].name = name
             self._changed()
 
     def _on_name(self):
         if self.project and self.selected in self.project.persons:
-            name = self.name_edit.text().strip() or f"인물 {self.selected}"
+            name = self.name_edit.text().strip() or Project.default_name(self.selected)
             if name != self.project.persons[self.selected].name:
                 self.project.persons[self.selected].name = name
                 self._changed()
@@ -728,6 +839,8 @@ class MainWindow(QMainWindow):
         self.picked = {x for x in self.picked if x in p.persons}
         if self.sel_track is not None and self.sel_track not in p.tracks:
             self.sel_track = None
+        if self.piece and (self.selected not in p.persons or self.piece not in p.pieces(self.selected)):
+            self.piece = None
         self._refresh_all()
 
     def undo(self):
@@ -946,6 +1059,24 @@ class MainWindow(QMainWindow):
         if on:
             self.status_label.setText("상자 편집: 상자를 끌어 옮기기 · 모서리로 크기 · 빈 곳을 끌어 새 상자")
         self.refresh_frame()
+
+    def toggle_fullscreen(self):
+        full = not self.isFullScreen()
+        for w in (self.inspector, self.timeline, self.statusBar()):
+            w.setVisible(not full)
+        for tb in self.findChildren(QToolBar):
+            tb.setVisible(not full)
+        if full:
+            self.showFullScreen()
+        else:
+            self.showNormal()
+        self.full_btn.setText("⤡" if full else "⤢")
+
+    def _escape(self):
+        if self.isFullScreen():
+            self.toggle_fullscreen()
+        elif self.piece:
+            self.select_piece(None)
 
     # ---------- 내보내기 ----------
     def export(self):
