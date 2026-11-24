@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt  # noqa: E402
@@ -62,6 +63,7 @@ def opened(app, tmp_path):
         person.effect, person.segments, person.splits = None, [], []
     pr.save()
     w._set_project(Project.load(video))
+    w._open_group(True)  # 기존 테스트는 사람별 줄 기준
     app.processEvents()
     yield w
     w.close()
@@ -203,6 +205,10 @@ def _press(tl, x, y, release_x=None):
     QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=QPointF(release_x or x, y).toPoint())
 
 
+def _row_of(tl, pid):
+    return next(i for i, r in enumerate(tl.rows) if r.pid == pid)
+
+
 def _row_y(tl, i):
     return tl.RULER + tl.ROW * i + tl.ROW // 2 - tl.scroll.value()
 
@@ -231,10 +237,11 @@ def test_drag_split_line_resizes_piece(app, opened):
     tl = w.timeline
     pid = tl.rows[1].pid
     p.add_segment(pid, 100, 200, preset_effect("smile"))
-    w._changed()
+    w.select_person(pid)
+    w._changed()  # 따로 정한 사람이 되어 줄 위치가 바뀜 (선택한 사람 줄은 보이게 스크롤)
     got = []
     tl.split_moved.connect(lambda *a: got.append(a))
-    _press(tl, tl._x(200), _row_y(tl, 1), tl._x(260))
+    _press(tl, tl._x(200), _row_y(tl, _row_of(tl, pid)), tl._x(260))
     assert got and got[0][:2] == (pid, 200) and abs(got[0][2] - 260) <= 2
     assert p.persons[pid].segments[0]["end"] == p.persons[pid].splits[1]
 
@@ -260,19 +267,51 @@ def test_double_click_name_renames(app, opened):
     assert w.project.persons[pid].name == "철수"
 
 
-def test_all_effect_warns_when_persons_have_own(app, opened, monkeypatch):
+def test_rest_group_collapses_and_only_rest_changes(app, opened, monkeypatch):
     w = opened
     p = w.project
-    pid = w.timeline.rows[1].pid
-    w._apply_preset(pid, "heart")
+    tl = w.timeline
     w.select_person(ALL)
-    asked = []
-    monkeypatch.setattr(w, "_ask_all", lambda n: asked.append(n) or "cancel")
-    w.set_effect(ALL, preset_effect("mosaic"))
-    assert asked == [1] and p.default_effect["type"] == "blur"  # 취소
-    monkeypatch.setattr(w, "_ask_all", lambda n: "all")
-    w.set_effect(ALL, preset_effect("mosaic"))
-    assert p.default_effect["type"] == "mosaic" and p.persons[pid].effect is None
+    w._open_group(False)
+    n = len(p.persons)
+    assert [r.pid for r in tl.rows] == [ALL] and tl.rows[0].name == f"모든 인물 {n}명"
+    assert tl.rows[0].presence  # 묶음 줄에도 등장 막대
+    pid = sorted(p.persons)[1]
+    w._apply_preset(pid, "heart")  # 이 사람만 따로 → 묶음에서 빠져 자기 줄
+    w._open_group(False)
+    assert tl.rows[0].name == f"나머지 {n - 1}명" and [r.pid for r in tl.rows] == [ALL, pid]
+    w.select_person(ALL)
+    w.set_effect(ALL, preset_effect("mosaic"))  # 나머지에만
+    assert p.default_effect["type"] == "mosaic" and p.persons[pid].effect["value"] == "heart"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    w.reset_all_to_rest()
+    assert p.persons[pid].effect is None and len(tl.rows) == 1
+
+
+def test_disclosure_click_expands_group(app, opened):
+    w = opened
+    tl = w.timeline
+    w.select_person(ALL)
+    w._open_group(False)
+    _press(tl, 10, _row_y(tl, 0))
+    assert w.group_open and len(tl.rows) == len(w.project.persons) + 1 and tl.rows[1].member
+
+
+def test_click_face_in_preview_selects_person(app, opened):
+    w = opened
+    p = w.project
+    w.select_person(ALL)
+    w._open_group(False)
+    w.seek(100)
+    tid, _name, box, _src = w.view.boxes[0]
+    r = w.view.to_screen(box)
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(w.view, Qt.MouseButton.LeftButton, pos=r.center().toPoint())
+    pid = p.tracks[tid].person
+    assert w.selected == pid and w.group_open  # 묶음 안 사람이면 펼쳐서 보여줌
+    assert any(r.pid == pid for r in w.timeline.rows)
+    w._apply_preset(pid, "smile")
+    assert p.effect_for(pid)["value"] == "smile" and w.selected == pid
 
 
 def test_image_library_keeps_uploads(app, tmp_path, monkeypatch):
@@ -321,7 +360,7 @@ def test_blade_tool_click_and_backspace_removes_part(app, opened):
     w.act_tool_blade.trigger()
     assert tl.tool == "blade"
     _press(tl, tl._x(a), _row_y(tl, 1))
-    _press(tl, tl._x(b), _row_y(tl, 1))
+    _press(tl, tl._x(b), _row_y(tl, _row_of(tl, pid)))
     sp = p.persons[pid].splits
     assert len(sp) == 2 and abs(sp[0] - a) <= 2 and abs(sp[1] - b) <= 2
     w.act_tool_select.trigger()

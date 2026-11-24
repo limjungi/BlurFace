@@ -22,7 +22,7 @@ EFFECT_COLORS = {"blur": "#0a84ff", "mosaic": "#bf5af2", "solid": "#8e8e93", "st
                  "image": "#30d158", "none": "#ff453a"}
 # 효과 버튼 (키, 이름). 스티커는 모양별로 따로 버튼
 PRESETS = [("blur", "블러"), ("mosaic", "모자이크"), ("solid", "단색"), ("none", "안 가림"),
-           ("smile", "스마일"), ("heart", "하트"), ("image", "내 이미지"), ("inherit", "모두와 같게")]
+           ("smile", "스마일"), ("heart", "하트"), ("image", "내 이미지"), ("inherit", "나머지와 같게")]
 PRESET_NAMES = dict(PRESETS)
 SHAPE_CHOICES = [("사각형", "rect"), ("둥근 사각형", "rounded"), ("타원", "ellipse")]
 SHAPED = ("mosaic", "blur", "solid")  # 모양·가장자리를 고를 수 있는 효과
@@ -202,6 +202,7 @@ class VideoView(QWidget):
     box_clicked = Signal(object)  # 트랙 번호 또는 None(빈 곳 클릭)
     box_changed = Signal(int, list)  # 트랙 번호, 새 영역
     box_drawn = Signal(list)  # 새로 그린 영역
+    face_clicked = Signal(int)  # 보기 모드에서 얼굴 클릭: 트랙 번호
 
     def __init__(self):
         super().__init__()
@@ -214,6 +215,7 @@ class VideoView(QWidget):
         self.boxes: list[tuple[int, str, list[float], str]] = []  # (트랙, 이름표, 영역, 출처)
         self.selected: int | None = None
         self._drag: dict | None = None
+        self._hover_face: int | None = None  # 보기 모드에서 마우스가 올라간 얼굴(트랙)
         self.setMouseTracking(True)
         self.busy: str | None = None  # 분석 중 안내 문구
         self.busy_progress: float | None = None  # 0~1, 모르면 None
@@ -313,6 +315,25 @@ class VideoView(QWidget):
             self._paint_busy(p)
             return
         if not self.edit:
+            hover = next(((txt, b) for t, txt, b, _s in self.boxes if t == self._hover_face), None)
+            if hover:  # 클릭하면 이 사람을 고를 수 있다는 표시
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                txt, b = hover
+                r = self.to_screen(b)
+                p.setPen(QPen(QColor(255, 255, 255, 220), 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r, 8, 8)
+                font = p.font()
+                font.setPointSizeF(12)
+                font.setWeight(QFont.Weight.DemiBold)
+                p.setFont(font)
+                tw = p.fontMetrics().horizontalAdvance(txt) + 16
+                tag = QRectF(r.center().x() - tw / 2, r.bottom() + 6, tw, 22)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(0, 0, 0, 170))
+                p.drawRoundedRect(tag, 11, 11)
+                p.setPen(QColor("#ffffff"))
+                p.drawText(tag, Qt.AlignmentFlag.AlignCenter, txt)
             return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         for tid, text, b, src in self.boxes:
@@ -350,7 +371,23 @@ class VideoView(QWidget):
                 return tid, "move"
         return None, None
 
+    def _face_at(self, pt: QPointF) -> int | None:
+        for tid, _t, b, _s in sorted(self.boxes, key=lambda x: (x[2][2] - x[2][0]) * (x[2][3] - x[2][1])):
+            if self.to_screen(b).contains(pt):
+                return tid
+        return None
+
+    def leaveEvent(self, _):
+        if self._hover_face is not None:
+            self._hover_face = None
+            self.update()
+
     def mousePressEvent(self, e):
+        if self._pix is not None and not self.edit and not self.busy and e.button() == Qt.MouseButton.LeftButton:
+            tid = self._face_at(e.position())
+            if tid is not None:
+                self.face_clicked.emit(tid)
+            return
         if not self.edit or self._pix is None or e.button() != Qt.MouseButton.LeftButton:
             return
         pt = e.position()
@@ -411,6 +448,16 @@ class VideoView(QWidget):
         self.update()
 
     def _update_cursor(self, pt: QPointF):
+        if not self.edit and self._pix is not None and not self.busy:
+            tid = self._face_at(pt)
+            if tid != self._hover_face:
+                self._hover_face = tid
+                self.update()
+            if tid is None:
+                self.unsetCursor()
+            else:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            return
         if not self.edit or self._pix is None:
             self.unsetCursor()
             return
@@ -423,7 +470,7 @@ class VideoView(QWidget):
 
 @dataclass
 class Row:
-    """타임라인 한 줄 (인물 한 명, 또는 맨 위 '모든 인물')."""
+    """타임라인 한 줄 (인물 한 명, 또는 맨 위 '나머지' 묶음)."""
     pid: int
     name: str
     effect: dict  # 실제로 적용되는 효과 (기본 효과 반영)
@@ -434,6 +481,7 @@ class Row:
     warn: bool = False
     pix: QPixmap | None = None
     splits: list[int] = field(default_factory=list)  # 자른 곳
+    member: bool = False  # '나머지' 묶음 안의 사람 (펼쳤을 때 들여 씀)
 
 
 class PersonTimeline(QWidget):
@@ -454,8 +502,10 @@ class PersonTimeline(QWidget):
     blade_at = Signal(int, int)  # 자르기 도구로 클릭: 인물, 프레임
     trimmed = Signal(int, int, int)  # 인물, 막대 끝 원래 위치, 새 위치
     renamed = Signal(int, str)
+    group_toggled = Signal()  # '나머지' 묶음 펼치기/접기
 
     RULER, ROW, LABEL, HBAR = 28, 40, 230, 10
+    INDENT = 16  # 묶음 안 사람 들여쓰기
     HANDLE = 6  # 끌기 손잡이 판정 거리(px)
 
     def __init__(self):
@@ -483,6 +533,7 @@ class PersonTimeline(QWidget):
         self.editor.hide()
         self.editor.editingFinished.connect(self._finish_rename)
         self._edit_pid: int | None = None
+        self.group_open = False
         self.setMinimumHeight(self.RULER + self.ROW * 3 + self.HBAR)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
@@ -497,6 +548,18 @@ class PersonTimeline(QWidget):
         self.rows = rows
         self.set_selection(current, picked, piece)
         self._layout()
+
+    def scroll_to(self, pid: int):
+        """그 사람 줄이 안 보이면 보이게 스크롤."""
+        i = next((i for i, r in enumerate(self.rows) if r.pid == pid), None)
+        if i is None:
+            return
+        top = i * self.ROW
+        view = self.height() - self.RULER - (self.HBAR if self.zoom > 1 else 0)
+        if top < self.scroll.value():
+            self.scroll.setValue(top)
+        elif top + self.ROW > self.scroll.value() + view:
+            self.scroll.setValue(top + self.ROW - view)
 
     def set_selection(self, current: int | None, picked: set[int], piece=None):
         self.current, self.picked, self.piece = current, set(picked), piece
@@ -615,8 +678,17 @@ class PersonTimeline(QWidget):
     def _chip(self, i: int) -> QRectF:
         return QRectF(self.LABEL - 84, self._top(i) + 10, 74, 20)
 
+    def _indent(self, i: int) -> float:
+        r = self.rows[i]
+        return self.INDENT if r.member or r.pid == ALL else 0
+
     def _name_rect(self, i: int) -> QRectF:
-        return QRectF(46, self._top(i) + 7, self.LABEL - 84 - 52, self.ROW - 14)
+        d = self._indent(i)
+        return QRectF(46 + d, self._top(i) + 7, self.LABEL - 84 - 52 - d, self.ROW - 14)
+
+    def _disclosure(self, i: int) -> QRectF:
+        """'나머지' 줄의 ▸ 펼치기 버튼."""
+        return QRectF(0, self._top(i), 44 + self.INDENT, self.ROW)
 
     def _handle_at(self, i: int, x: float) -> dict | None:
         """막대 칸에서 끌 수 있는 곳: 자른 곳, 막대 끝."""
@@ -685,8 +757,15 @@ class PersonTimeline(QWidget):
             p.drawPolygon([QPointF(x - 6, self.RULER - 12), QPointF(x + 6, self.RULER - 12), QPointF(x, self.RULER - 4)])
 
     def _paint_label(self, p: QPainter, i: int, r: Row, t: float):
-        face = QRectF(12, t + 6, 28, 28)
+        face = QRectF(12 + self._indent(i), t + 6, 28, 28)
         if r.pid == ALL:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#aeaeb2"))
+            cx, cy = 13, t + self.ROW / 2
+            if self.group_open:  # ▾
+                p.drawPolygon([QPointF(cx - 4.5, cy - 2.5), QPointF(cx + 4.5, cy - 2.5), QPointF(cx, cy + 3)])
+            else:  # ▸
+                p.drawPolygon([QPointF(cx - 2.5, cy - 4.5), QPointF(cx - 2.5, cy + 4.5), QPointF(cx + 3, cy)])
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor("#3a3a3c"))
             p.drawRoundedRect(face, 7, 7)
@@ -752,14 +831,14 @@ class PersonTimeline(QWidget):
         if not self.n:
             return
         x0, x1 = self._span()
-        if r.pid == ALL:
+        if r.pid == ALL and not r.presence:
             font = p.font()
             font.setPointSizeF(11)
             font.setWeight(QFont.Weight.Normal)
             p.setFont(font)
             p.setPen(QColor("#8e8e93"))
             p.drawText(QRectF(x0 + 4, t, x1 - x0, self.ROW), Qt.AlignmentFlag.AlignVCenter,
-                       "효과를 따로 정하지 않은 모든 인물에 적용되는 기본 효과")
+                       "모든 사람이 효과를 따로 정했어요")
             return
         y, hh = t + 8, self.ROW - 16
         r = self._preview(r)
@@ -874,6 +953,9 @@ class PersonTimeline(QWidget):
                 f = self._frame_at(pos.x())
                 self.piece_clicked.emit(r.pid, f)
                 self.piece_menu.emit(r.pid, f, gp)
+            return
+        if in_label and r.pid == ALL and self._disclosure(i).contains(pos):
+            self.group_toggled.emit()
             return
         if in_label:
             multi = bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
@@ -1187,7 +1269,7 @@ class EffectPicker(QWidget):
     def key(self) -> str:
         return self._key
 
-    def set_inherit_allowed(self, on: bool, label_: str = "모두와 같게"):
+    def set_inherit_allowed(self, on: bool, label_: str = "나머지와 같게"):
         self.allow_inherit = on
         self.btns["inherit"].setVisible(on)
         self.btns["inherit"].setText(label_)

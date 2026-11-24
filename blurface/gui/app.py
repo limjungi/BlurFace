@@ -26,8 +26,8 @@ from ..render import compose
 from ..video import probe
 from .source import FrameSource
 from .theme import apply_theme
-from .widgets import (ALL, PRESETS, arrow_icon, tool_icon, EffectPicker, PersonTimeline, Row, SeekBar, VideoView, preset_effect,
-                      preset_icon, preset_of)
+from .widgets import (ALL, PRESETS, EffectPicker, PersonTimeline, Row, SeekBar, VideoView, arrow_icon, effect_short,
+                      preset_effect, preset_icon, preset_of, tool_icon)
 from .workers import AnalyzeWorker, ExportWorker
 
 VIDEO_EXT = "영상 (*.mp4 *.mov *.m4v *.mkv *.avi *.webm)"
@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
         self.sel_track: int | None = None  # 미리보기에서 선택한 상자(트랙)
         self.speed = 1.0
         self.piece: tuple[int, int] | None = None  # 선택한 조각 (자른 인물 줄의 한 부분)
-        self._all_keep = False  # '모든 인물' 효과를 바꿀 때 따로 정한 사람은 그대로 두기로 했는지
+        self.group_open = False  # '나머지' 묶음을 펼쳤는지
         self.review: list[tuple[int, int, str]] = []
         self.worker = None
         self._threads: set = set()  # 스레드가 완전히 끝날 때까지 참조 유지 (먼저 지우면 앱이 죽음)
@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self.view.box_clicked.connect(self._on_box_clicked)
         self.view.box_changed.connect(self._on_box_changed)
         self.view.box_drawn.connect(self._on_box_drawn)
+        self.view.face_clicked.connect(self._on_face_clicked)
         self.play_btn = QToolButton()
         self.play_btn.setObjectName("play")
         self.play_btn.setText("▶")
@@ -211,6 +212,7 @@ class MainWindow(QMainWindow):
         self.timeline.split_moved.connect(self._on_split_moved)
         self.timeline.trimmed.connect(self._on_trimmed)
         self.timeline.renamed.connect(self.rename)
+        self.timeline.group_toggled.connect(lambda: self._open_group(not self.group_open))
 
         tl_bar = QHBoxLayout()
         tl_bar.setContentsMargins(10, 4, 10, 4)
@@ -640,12 +642,45 @@ class MainWindow(QMainWindow):
         review: dict[int, list[int]] = {}
         for f, pid, _ in self.review:
             review.setdefault(pid, []).append(f)
-        rows = [Row(ALL, "모든 인물", p.default_effect)]
-        for pid, person in sorted(p.persons.items()):
-            rows.append(Row(pid, person.name, p.effect_for(pid), person.effect is None,
-                            self._runs(p.person_frames(pid)), person.segments, review.get(pid, []),
-                            p.needs_review(pid), self._thumb(pid), list(person.splits)))
+        rest = self._rest()
+
+        def row(pid, member=False):
+            person = p.persons[pid]
+            return Row(pid, person.name, p.effect_for(pid), person.effect is None,
+                       self._runs(p.person_frames(pid)), person.segments, review.get(pid, []),
+                       p.needs_review(pid), self._thumb(pid), list(person.splits), member)
+        frames = set().union(*(p.person_frames(pid) for pid in rest)) if rest else set()
+        rows = [Row(ALL, self._rest_title(), p.default_effect, False, self._runs(frames))]
+        if self.group_open:
+            rows += [row(pid, True) for pid in rest]
+        rows += [row(pid) for pid in sorted(p.persons) if pid not in rest]
+        self.timeline.group_open = self.group_open
         self.timeline.set_rows(rows, self.selected, self.picked, self.piece)
+        if self.selected is not None:
+            self.timeline.scroll_to(self.selected)
+
+    def _rest(self) -> list[int]:
+        """'나머지' 묶음: 효과를 따로 정하지 않은 사람 (인물 효과·자르기·구간 효과 없음)."""
+        return [pid for pid, person in sorted(self.project.persons.items())
+                if person.effect is None and not person.segments and not person.splits]
+
+    def _rest_title(self) -> str:
+        n = len(self._rest())
+        return f"모든 인물 {n}명" if n == len(self.project.persons) else f"나머지 {n}명"
+
+    def _open_group(self, on: bool):
+        if on != self.group_open:
+            self.group_open = on
+            self._refresh_timeline()
+
+    def _on_face_clicked(self, tid: int):
+        """미리보기에서 얼굴을 누르면 그 사람을 골라 바로 효과를 바꿀 수 있게."""
+        p = self.project
+        if not p or tid not in p.tracks or p.tracks[tid].person not in p.persons:
+            return
+        pid = p.tracks[tid].person
+        self.select_person(pid)
+        self.status_label.setText(f"{p.persons[pid].name} 선택 · 오른쪽에서 효과를 바꾸면 이 사람만 바뀌어요")
 
     def _refresh_inspector(self):
         p, sel = self.project, self.selected
@@ -659,7 +694,7 @@ class MainWindow(QMainWindow):
             self.insp_title.setText("BlurFace")
             self.insp_sub.setText("영상을 열거나 창에 끌어다 놓으면 얼굴을 자동으로 찾아 가려 줍니다.")
         elif not is_person:
-            self.insp_title.setText("모든 인물")
+            self.insp_title.setText(self._rest_title())
             self.picker.set_inherit_allowed(False)
             self.picker.set_effect(p.default_effect)
         else:
@@ -674,7 +709,7 @@ class MainWindow(QMainWindow):
                 a, b = self.piece
                 seg = next((x for x in person.segments if x["start"] <= a and b <= x["end"]), None)
                 self.piece_label.setText(f"선택한 부분 {fmt_time(p.time_of(a))} ~ {fmt_time(p.time_of(b))}만 바꾸는 중")
-                self.picker.set_inherit_allowed(True, "나머지와 같게")
+                self.picker.set_inherit_allowed(True, "이 사람 효과 그대로")
                 self.picker.set_effect(seg["effect"] if seg else None)
             else:
                 self.piece_label.setText(f"{len(p.pieces(sel))}부분으로 잘려 있어요 · 막대를 눌러 한 부분만 바꿀 수 있어요")
@@ -714,8 +749,10 @@ class MainWindow(QMainWindow):
             self.picked = {pid} if pid != ALL else set()
         if pid != self.selected:
             self.piece = None
-            self._all_keep = False
         self.selected = pid
+        if pid != ALL and not self.group_open and pid in self._rest():
+            self._open_group(True)  # 묶음 안 사람이면 펼쳐서 보여줌
+        self.timeline.scroll_to(pid)
         if self.sel_track in self.project.tracks and self.project.tracks[self.sel_track].person != pid and pid != ALL:
             self.sel_track = None
         self.timeline.set_selection(self.selected, self.picked, self.piece)
@@ -739,27 +776,16 @@ class MainWindow(QMainWindow):
         return {**effect, "value": str(dst)}
 
     def _overridden(self) -> list[int]:
-        """효과를 따로 정한 인물 (인물 효과나 구간 효과가 있음)."""
-        return [pid for pid, person in self.project.persons.items() if person.effect is not None or person.segments]
+        """효과를 따로 정한 사람 ('나머지' 묶음 밖)."""
+        rest = set(self._rest())
+        return [pid for pid in sorted(self.project.persons) if pid not in rest]
 
-    def set_effect(self, pid: int, effect: dict | None, ask: bool = True):
+    def set_effect(self, pid: int, effect: dict | None):
         effect = self._import_asset(effect)
         p = self.project
-        if pid == ALL:
+        if pid == ALL:  # '나머지' 묶음에만 적용 (따로 정한 사람은 그대로)
             if not effect:
                 return
-            over = self._overridden()
-            if over and ask and not self._all_keep:
-                choice = self._ask_all(len(over))
-                if choice == "all":
-                    for opid in over:
-                        person = p.persons[opid]
-                        person.effect, person.segments, person.splits = None, [], []
-                elif choice == "keep":
-                    self._all_keep = True  # 이번에 고르는 동안은 다시 묻지 않음
-                else:
-                    self._refresh_inspector()
-                    return
             p.default_effect = effect
         elif self.piece and pid == self.selected:
             p.set_piece_effect(pid, *self.piece, effect)
@@ -767,18 +793,21 @@ class MainWindow(QMainWindow):
             p.persons[pid].effect = effect
         self._changed()
 
-    def _ask_all(self, n: int) -> str:
-        """'all' | 'keep' | 'cancel'"""
-        box = QMessageBox(self)
-        box.setWindowTitle("모든 인물에 적용")
-        box.setText(f"{n}명은 따로 정한 효과가 있어요.")
-        box.setInformativeText("모두에게 적용하면 그 사람들의 개별 효과와 구간 효과가 사라집니다.")
-        all_btn = box.addButton("모두에게 적용", QMessageBox.ButtonRole.DestructiveRole)
-        keep_btn = box.addButton("따로 정한 사람은 그대로", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(keep_btn)
-        box.exec()
-        return "all" if box.clickedButton() is all_btn else "keep" if box.clickedButton() is keep_btn else "cancel"
+    def reset_all_to_rest(self):
+        """따로 정한 사람까지 모두 '나머지' 효과로 되돌린다."""
+        over = self._overridden()
+        if not over:
+            return
+        if QMessageBox.question(self, "모두 같은 효과로",
+                                f"따로 정한 {len(over)}명의 효과와 자른 부분을 모두 없애고 "
+                                f"'{effect_short(self.project.default_effect)}'(으)로 맞출까요?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for pid in over:
+            person = self.project.persons[pid]
+            person.effect, person.segments, person.splits = None, [], []
+        self.piece = None
+        self._changed()
 
     def _on_picker(self):
         if self.project and self.selected is not None:
@@ -805,7 +834,7 @@ class MainWindow(QMainWindow):
         for key, label_ in PRESETS:
             if key == "inherit" and pid == ALL:
                 continue
-            a = m.addAction(preset_icon(key), label_ if key != "inherit" else "'모든 인물'과 같게")
+            a = m.addAction(preset_icon(key), label_ if key != "inherit" else "나머지와 같게")
             a.setCheckable(True)
             a.setChecked(preset_of(cur) == key)
             a.triggered.connect(lambda _=False, k=key: self._apply_preset(pid, k))
@@ -883,7 +912,7 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         sub = m.addMenu("이 부분 효과" if piece else "효과")
         for key, label_ in PRESETS:
-            text = label_ if key != "inherit" else ("나머지와 같게" if piece else "'모든 인물'과 같게")
+            text = label_ if key != "inherit" else ("이 사람 효과 그대로" if piece else "나머지와 같게")
             sub.addAction(preset_icon(key), text).triggered.connect(
                 lambda _=False, k=key: self._apply_preset(pid, k, piece))
         m.addAction("여기서 자르기").triggered.connect(lambda: self._blade_at(pid, frame))
@@ -939,7 +968,18 @@ class MainWindow(QMainWindow):
         self._changed(track_changed=True)
 
     def _context_menu(self, pid: int, pos):
-        if pid == ALL or not self.project:
+        if not self.project:
+            return
+        if pid == ALL:
+            m = QMenu(self)
+            m.addAction("효과 바꾸기…").triggered.connect(lambda: self._effect_menu(pid, pos))
+            m.addAction("접기" if self.group_open else "펼쳐서 사람별로 보기").triggered.connect(
+                lambda: self._open_group(not self.group_open))
+            over = self._overridden()
+            if over:
+                m.addSeparator()
+                m.addAction(f"따로 정한 {len(over)}명도 이 효과로 맞추기…").triggered.connect(self.reset_all_to_rest)
+            m.exec(pos)
             return
         m = QMenu(self)
         m.addAction("효과 바꾸기…").triggered.connect(lambda: self._effect_menu(pid, pos))
