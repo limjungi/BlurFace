@@ -460,3 +460,60 @@ def test_cannot_delete_open_project(app, opened, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
     w._delete_project(w.sidebar.items[0])
     assert shown and w.project.dir.exists()
+
+
+def test_open_blurface_project_folder(app, opened):
+    w = opened
+    d = w.project.dir
+    video = w.project.video.path
+    w.open_video(video)  # 다른 상태로 바꿨다가
+    w.project = None
+    w.open_path(str(d))  # .blurface 폴더를 골라 열기
+    assert w.project is not None and w.project.dir == d
+
+
+def test_effect_buttons_one_row_and_name_in_heading(app):
+    picker = EffectPicker(allow_inherit=True)
+    picker.resize(360, 400)
+    picker.show()
+    app.processEvents()
+    assert len({b.y() for b in picker.btns.values() if b.isVisible()}) == 1  # 한 줄
+    assert all(b.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly for b in picker.btns.values())
+    assert picker.btns["mosaic"].toolTip() == "모자이크"
+    picker.set_effect(preset_effect("mosaic"))
+    assert picker.heading.text() == "효과 · 모자이크"
+
+
+def test_thumb_hover_shows_delete(app, tmp_path):
+    import cv2
+    import numpy as np
+
+    from blurface import library
+    img = tmp_path / "me.png"
+    cv2.imwrite(str(img), np.full((20, 20, 4), 255, np.uint8))
+    library.add(img)
+    picker = EffectPicker()
+    picker._on_click("image")
+    thumb = picker.lib_grid.itemAt(0).widget()
+    assert not thumb.close_btn.isVisibleTo(thumb)
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent
+    app.sendEvent(thumb, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+    assert thumb.close_btn.isVisibleTo(thumb)
+    thumb.close_btn.click()
+    assert library.images() == []
+
+
+def test_audio_follows_play_seek_speed(app, opened, monkeypatch):
+    w = opened
+    calls = []
+    for name in ("play", "pause", "seek", "set_rate"):
+        monkeypatch.setattr(w.audio, name, lambda *a, n=name: calls.append((n, *a)))
+    w.seek(30)
+    w.toggle_play()
+    w.seek(300)
+    w.set_speed(2.0)
+    w.pause()
+    names = [c[0] for c in calls]
+    assert names == ["play", "seek", "set_rate", "pause"]
+    assert calls[1][1] == pytest.approx(w._time(300))

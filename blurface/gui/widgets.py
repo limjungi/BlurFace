@@ -82,6 +82,25 @@ def preset_effect(key: str, prev: dict | None = None) -> dict | None:
 
 
 @lru_cache(maxsize=8)
+def sidebar_icon(size: int = 18) -> QIcon:
+    """사이드바 열고 닫기 아이콘 (왼쪽 칸이 있는 창)."""
+    pix = QPixmap(size * 2, size * 2)
+    pix.setDevicePixelRatio(2)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor("#f2f2f7"), 1.5))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    r = QRectF(2, 3.5, size - 4, size - 7)
+    p.drawRoundedRect(r, 2.5, 2.5)
+    p.drawLine(QPointF(r.x() + 5.5, r.top()), QPointF(r.x() + 5.5, r.bottom()))
+    p.setPen(QPen(QColor("#f2f2f7"), 1.2))
+    for y in (r.top() + 3, r.top() + 5.5):
+        p.drawLine(QPointF(r.x() + 1.8, y), QPointF(r.x() + 3.8, y))
+    p.end()
+    return QIcon(pix)
+
+
 def arrow_icon(redo: bool = False, size: int = 18) -> QIcon:
     """실행 취소/다시 실행 아이콘 (굽은 화살표)."""
     pix = QPixmap(size * 2, size * 2)
@@ -1115,6 +1134,36 @@ class SeekBar(QWidget):
         self.update()
 
 
+class ThumbButton(QToolButton):
+    """내 이미지 썸네일. 마우스를 올리면 오른쪽 위에 × (보관함에서 지우기) 버튼이 생김."""
+
+    remove_clicked = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.close_btn = QToolButton(self)
+        self.close_btn.setObjectName("thumbClose")
+        self.close_btn.setText("×")
+        self.close_btn.setToolTip("보관함에서 지우기")
+        self.close_btn.setFixedSize(18, 18)
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.remove_clicked)
+        self.close_btn.hide()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.close_btn.move(self.width() - self.close_btn.width() - 1, 1)
+
+    def enterEvent(self, e):
+        self.close_btn.show()
+        self.close_btn.raise_()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.close_btn.hide()
+        super().leaveEvent(e)
+
+
 class ValueSlider(QWidget):
     """슬라이더 + 값 표시."""
 
@@ -1191,20 +1240,24 @@ class EffectPicker(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
         self.group = QButtonGroup(self)
         self.btns: dict[str, QToolButton] = {}
+        self.heading = QLabel("효과")  # 이름은 버튼에 쓰지 않고 여기와 마우스 오버로 보여 줌
+        self.heading.setObjectName("section")
         for i, (key, label_) in enumerate(PRESETS):
             b = QToolButton()
             b.setObjectName("preset")
             b.setCheckable(True)
             b.setText(label_)
+            b.setToolTip(label_)
             b.setIcon(preset_icon(key))
-            b.setIconSize(QSize(30, 30))
-            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            b.setIconSize(QSize(22, 22))
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            b.setMinimumHeight(62)
+            b.setFixedHeight(38)
+            b.setMinimumWidth(30)
             b.clicked.connect(lambda _=False, k=key: self._on_click(k))
             self.group.addButton(b)
             self.btns[key] = b
-            grid.addWidget(b, i // 4, i % 4)
+            grid.addWidget(b, 0, i)
 
         # 내 이미지 보관함
         self.library = QWidget()
@@ -1277,6 +1330,7 @@ class EffectPicker(QWidget):
     def _sync(self):
         k = self._key
         self.btns[k].setChecked(True)
+        self.heading.setText(f"효과 · {self.btns[k].text()}")
         rows = {self.strength: k == "blur", self.blocks: k == "mosaic", self.color_btn: k == "solid",
                 self.library: k == "image", self._shapes: k in SHAPED, self.feather: k in SHAPED,
                 self.scale: k not in ("none", "inherit"), self.under: k in ("smile", "heart", "image")}
@@ -1293,14 +1347,15 @@ class EffectPicker(QWidget):
                 w.deleteLater()
         items = library.images()
         for i, path in enumerate(items):
-            b = QToolButton()
+            b = ThumbButton()
+            b.remove_clicked.connect(lambda pth=str(path): self._remove_image(pth))
             b.setObjectName("thumb")
             b.setCheckable(True)
             b.setIcon(QIcon(QPixmap(str(path)).scaled(88, 88, Qt.AspectRatioMode.KeepAspectRatio,
                                                       Qt.TransformationMode.SmoothTransformation)))
             b.setIconSize(QSize(40, 40))
             b.setFixedSize(52, 52)
-            b.setToolTip(f"{path.name}\n우클릭: 보관함에서 지우기")
+            b.setToolTip(path.name)
             b.setChecked(bool(self.image_path) and Path(self.image_path).name == path.name)
             b.clicked.connect(lambda _=False, pth=str(path): self._use_image(pth))
             b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1315,6 +1370,9 @@ class EffectPicker(QWidget):
         add.clicked.connect(self._pick_image)
         n = len(items)
         self.lib_grid.addWidget(add, n // 5, n % 5)
+        for c in range(5):
+            self.lib_grid.setColumnStretch(c, 0)
+        self.lib_grid.setColumnStretch(5, 1)  # 왼쪽부터 붙여서
 
     def _use_image(self, path: str):
         self.image_path = path

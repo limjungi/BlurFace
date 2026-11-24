@@ -14,7 +14,7 @@ a = Analysis(
     datas=models,
     hiddenimports=["scipy.optimize", "scipy.sparse.csgraph"],
     excludes=["tkinter", "matplotlib", "IPython", "pytest", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
-              "PySide6.Qt3DCore", "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtPdf", "PySide6.QtMultimedia"],
+              "PySide6.Qt3DCore", "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtPdf"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -36,7 +36,22 @@ app = BUNDLE(
         "LSApplicationCategoryType": "public.app-category.video",
         "NSRequiresAquaSystemAppearance": False,
         # 영상 파일을 앱 아이콘에 끌어다 놓거나 '다음으로 열기'로 열 수 있게
+        # .blurface 프로젝트 = 문서 패키지 (Finder에서 파일 하나로 보이고, 더블클릭하면 BlurFace로 열림)
+        "UTExportedTypeDeclarations": [{
+            "UTTypeIdentifier": "io.github.limjungi.blurface.project",
+            "UTTypeDescription": "BlurFace 프로젝트",
+            "UTTypeConformsTo": ["com.apple.package", "public.composite-content"],
+            "UTTypeIconFile": "BlurFace.icns",
+            "UTTypeTagSpecification": {"public.filename-extension": ["blurface"]},
+        }],
         "CFBundleDocumentTypes": [{
+            "CFBundleTypeName": "BlurFace 프로젝트",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Owner",
+            "LSTypeIsPackage": True,
+            "CFBundleTypeIconFile": "BlurFace.icns",
+            "LSItemContentTypes": ["io.github.limjungi.blurface.project"],
+        }, {
             "CFBundleTypeName": "Video",
             "CFBundleTypeRole": "Editor",
             "LSHandlerRank": "Alternate",

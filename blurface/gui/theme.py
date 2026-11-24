@@ -27,6 +27,9 @@ QToolButton#seg {{ background: #2c2c2e; border: 1px solid #3a3a3c; border-radius
                    font-size: 11px; color: #d1d1d6; }}
 QToolButton#seg:checked {{ background: rgba(10, 132, 255, 0.22); border: 1px solid {ACCENT}; color: white; }}
 QToolButton#thumb {{ background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px; font-size: 20px; color: #8e8e93; }}
+QToolButton#thumbClose {{ background: rgba(0, 0, 0, 0.75); border: 1px solid #636366; border-radius: 9px;
+                          color: white; font-size: 12px; font-weight: 700; padding: 0; }}
+QToolButton#thumbClose:hover {{ background: #ff453a; border-color: #ff453a; }}
 QToolButton#thumb:hover {{ background: #3a3a3c; }}
 QToolButton#thumb:checked {{ border: 2px solid {ACCENT}; }}
 QSlider::groove:horizontal {{ height: 4px; background: #3a3a3c; border-radius: 2px; }}
