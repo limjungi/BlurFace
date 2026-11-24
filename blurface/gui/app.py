@@ -1083,12 +1083,15 @@ class MainWindow(QMainWindow):
         if not self.project or self.worker:
             return
         self.pause()
-        src = Path(self.project.video.path)
-        default = str(src.with_name(src.stem + "_mosaic.mp4"))
-        out, _ = QFileDialog.getSaveFileName(self, "내보내기", default, "MP4 영상 (*.mp4)")
-        if not out:
+        from .export_dialog import ExportDialog
+        dlg = ExportDialog(self.project, self)
+        if dlg.exec() != ExportDialog.DialogCode.Accepted:
             return
-        w = ExportWorker(self.project, out)
+        out = dlg.out_path()
+        if Path(out).exists() and QMessageBox.question(self, "내보내기", f"{Path(out).name} 파일이 이미 있어요. 덮어쓸까요?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        w = ExportWorker(self.project, out, dlg.options())
         w.done.connect(self._on_exported)
         self._run_worker(w, "내보내는 중…")
 

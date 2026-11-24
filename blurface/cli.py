@@ -102,7 +102,9 @@ def _render(p: Project, args):
 
     out = Path(args.output) if args.output else Path(p.video.path).with_name(Path(p.video.path).stem + "_mosaic.mp4")
     write_person_sheet(p)
-    secs = render(p, out, debug=args.debug, progress=_progress("내보내는 중"))
+    from .render import ExportOptions
+    opts = ExportOptions(args.codec, args.quality, None if args.resolution == "original" else int(args.resolution.rstrip("p")))
+    secs = render(p, out, debug=args.debug, progress=_progress("내보내는 중"), opts=opts)
     print(file=sys.stderr)
     print(f"완료: {out}  ({secs:.1f}초)")
 
@@ -118,6 +120,9 @@ def main(argv=None):
         sp.add_argument("--clear-at", action="append", metavar="번호", help="인물의 구간 효과 지우기")
         sp.add_argument("-o", "--output", help="출력 파일 (기본: 원본이름_mosaic.mp4)")
         sp.add_argument("--debug", action="store_true", help="상자와 인물 번호 표시")
+        sp.add_argument("--codec", choices=["hevc", "h264"], default="hevc", help="hevc: 작고 선명(기본) / h264: 어디서나 재생")
+        sp.add_argument("--quality", choices=["high", "normal", "small"], default="high", help="화질 (기본 high = 원본 수준)")
+        sp.add_argument("--resolution", default="original", help="original(기본) / 2160p / 1440p / 1080p / 720p")
 
     sp = sub.add_parser("gui", help="화면으로 열기")
     sp.add_argument("video", type=Path, nargs="?")
