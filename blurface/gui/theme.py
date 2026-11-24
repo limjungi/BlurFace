@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -78,6 +79,11 @@ QToolTip {{ background: #3a3a3c; color: #f2f2f7; border: none; padding: 4px 6px;
 
 
 def apply_theme(app: QApplication):
+    # 맥 시스템이 라이트 모드여도 맨 위 메뉴·알림 창·파일 선택 창까지 어둡게
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+    except AttributeError:  # Qt 6.8 미만
+        pass
     app.setStyle("Fusion")
     pal = QPalette()
     for role, color in [(QPalette.ColorRole.Window, "#1e1e20"), (QPalette.ColorRole.WindowText, "#f2f2f7"),
