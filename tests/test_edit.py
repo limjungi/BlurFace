@@ -114,7 +114,7 @@ def test_review_points_find_interp_and_low_score(tmp_path):
 def test_load_v2_project_migrates(tmp_path):
     p = make(tmp_path)
     path = p.dir / "project.json"
-    p.dir.mkdir()
+    p.dir.mkdir(parents=True)
     v2 = {"version": 2, "video": json.loads(json.dumps(p.video.__dict__)), "n_frames": 100, "cuts": [],
           "default_effect": {"type": "mosaic", "value": 8},
           "persons": {"0": {"name": "A", "tracks": [0], "thumb": [], "effect": None, "segments": []}},

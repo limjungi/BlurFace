@@ -155,6 +155,10 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
     Project.backup(video)  # 다시 분석이면 덮어쓰기 전 상태(고친 내용·효과 설정)를 보관
     project.save()
     write_person_sheet(project)
+    # 목록 표지: 앞부분(최대 10초)에서 밝은 장면
+    head = bright[: max(1, min(len(bright) // 10, round(info.fps * 10)))]
+    from .projects import make_cover
+    make_cover(project.dir, video, int(np.argmax(np.minimum(head, 150))) if head else 0)
     log(f"분석 완료: {n}프레임, 컷 {len(cuts)}개, 트랙 {len(tracks)}개, 인물 {len(persons)}명 "
         f"({project.timings['total_analyze']:.1f}초)")
     return project

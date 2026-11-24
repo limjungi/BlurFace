@@ -46,7 +46,7 @@ scripts/build_app.sh                     # → dist/BlurFace.app, dist/BlurFace-
 ### 명령어로 쓰기 (CLI)
 ```sh
 uv run blurface run 영상.mp4                    # 분석 + 영상_mosaic.mp4 생성
-uv run blurface persons 영상.mp4                # 인물 번호 확인 (영상.blurface/persons.jpg)
+uv run blurface persons 영상.mp4                # 인물 번호 확인 (~/Movies/BlurFace/영상.blurface/persons.jpg)
 uv run blurface render 영상.mp4 --person 1=sticker:smile --person 4=none
 uv run blurface render 영상.mp4 --person-at 1@12-20=sticker:heart   # 인물 1만 12~20초 하트
 uv run blurface render 영상.mp4 --codec h264 --quality small --resolution 720p   # 가볍게 내보내기
@@ -56,6 +56,7 @@ uv run blurface render 영상.mp4 --codec h264 --quality small --resolution 720p
 예: `--person 2=blur:40,shape=ellipse,feather=20`
 
 ## 화면 사용법 (파이널컷과 비슷한 배치)
+- 왼쪽 사이드바 = 프로젝트 목록 (표지·길이·인물 수·최근 수정). 눌러서 열기, 우클릭: Finder에서 보기·원본 다시 연결·삭제. `⌥⌘S`로 숨기기
 - 효과를 따로 정하지 않은 사람은 맨 위 "나머지 N명" 한 줄로 묶임 (▸로 펼치기). 이 줄의 효과는 나머지에게만 적용
 - 따로 효과를 정한 사람은 자기 줄이 생김. 막대 색 = 그 사람에게 걸린 효과 (기본: 타원 블러)
 - 미리보기에서 얼굴을 클릭하면 그 사람이 선택되어 바로 효과 변경
@@ -78,7 +79,8 @@ uv run blurface render 영상.mp4 --codec h264 --quality small --resolution 720p
 ## 저장 위치
 | 무엇 | 어디 |
 |---|---|
-| 작업 내용 (분석 결과, 효과, 고친 상자, 백업) | 영상 옆 `영상이름.blurface/` 폴더. 다시 분석해도 고친 내용 유지 |
+| 프로젝트 (분석 결과, 효과, 고친 상자, 백업) | `~/Movies/BlurFace/영상이름.blurface/` (사용자마다 자기 '동영상' 폴더에 자동 생성). **파일 → 프로젝트 저장 위치**에서 변경 가능 |
+| 원본 영상 | 복사하지 않고 위치만 기억. 옮기면 사이드바에서 눌러 다시 연결 |
 | 내 이미지 보관함 | `~/Library/Application Support/BlurFace/stickers/` |
 | 결과 영상 | 기본값: 영상 옆 `영상이름_mosaic.mp4` |
 
