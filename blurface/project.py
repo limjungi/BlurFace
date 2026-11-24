@@ -23,6 +23,7 @@ from .effects import SHAPES
 from .video import VideoInfo
 
 BACKUP_KEEP = 10  # 백업을 최근 몇 개까지 남길지
+BRIDGE_SEC = 1.0  # 같은 사람을 이만큼 이하로 놓치면 앞뒤 상자를 이어서 가림
 VERSION = 4  # 4: 인물 번호 1부터·자르기(splits) / 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
@@ -126,6 +127,7 @@ class Project:
     def __post_init__(self):
         self._cache: dict[int, dict] = {}
         self._per: dict | None = None
+        self._bridged: dict[int, set[int]] = {}
 
     @staticmethod
     def dir_for(video: str | Path) -> Path:
@@ -250,7 +252,9 @@ class Project:
         return scores[int(len(scores) * 0.75)] < 0.7
 
     def person_frames(self, pid: int) -> list[int]:
-        return sorted({f for t in self.persons[pid].tracks for f in self.track_boxes(t)})
+        own = {f for t in self.persons[pid].tracks for f in self.track_boxes(t)}
+        self.boxes_by_frame()
+        return sorted(own | self._bridged.get(pid, set()))
 
     # ---------- 실제로 가릴 상자 계산 ----------
     def track_boxes(self, tid: int) -> dict[int, tuple[list[float], str]]:
@@ -305,8 +309,44 @@ class Project:
             for tid in self.tracks:
                 for f, (b, s) in self.track_boxes(tid).items():
                     per.setdefault(f, []).append((tid, b, s))
+            self._bridged = {}
+            for pid in self.persons:
+                for f, tid, box in self._bridges(pid):
+                    per.setdefault(f, []).append((tid, box, "interp"))
+                    self._bridged.setdefault(pid, set()).add(f)
             self._per = per
         return self._per
+
+    def _bridges(self, pid: int) -> list[tuple[int, int, list[float]]]:
+        """같은 사람이 잠깐(최대 BRIDGE_SEC) 놓쳤다 다시 잡힌 틈을 상자 보간으로 메운다.
+
+        고개를 숙이거나 손으로 가려 검출이 끊겨도 얼굴 일부가 보일 수 있어서.
+        장면 전환이 끼어 있거나, 사람이 일부러 지운 구간이거나, 위치가 크게 다르면 메우지 않는다.
+        """
+        person = self.persons[pid]
+        at: dict[int, tuple[int, list[float]]] = {}
+        removed = []
+        for tid in person.tracks:
+            for f, (b, _s) in self.track_boxes(tid).items():
+                at[f] = (tid, b)
+            removed += self.tracks[tid].removed
+        frames = sorted(at)
+        out = []
+        limit = max(2, round(self.video.fps * BRIDGE_SEC))
+        for a, b in zip(frames, frames[1:]):
+            if not 1 < b - a <= limit:
+                continue
+            if any(a < c <= b for c in self.cuts) or any(ra < b and a + 1 < rb for ra, rb in removed):
+                continue
+            (tid, ba), (_t, bb) = at[a], at[b]
+            size = max(ba[2] - ba[0], ba[3] - ba[1], bb[2] - bb[0], bb[3] - bb[1])
+            dist = np.hypot((ba[0] + ba[2] - bb[0] - bb[2]) / 2, (ba[1] + ba[3] - bb[1] - bb[3]) / 2)
+            if dist > size * 1.5:
+                continue
+            for f in range(a + 1, b):
+                w = (f - a) / (b - a)
+                out.append((f, tid, [*(ba[i] * (1 - w) + bb[i] * w for i in range(4)), 0.0]))
+        return out
 
     def _touch(self, *tids: int):
         for t in tids:

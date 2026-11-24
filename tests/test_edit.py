@@ -217,3 +217,36 @@ def test_old_project_names_and_segments_migrate(tmp_path):
     q = Project.load(p.video.path)
     assert q.persons[0].name == "인물 1" and q.persons[1].name == "철수"
     assert q.persons[0].splits == [10, 30]
+
+
+def _two_pieces(tmp_path, gap_start=40, gap_end=48, x2=None):
+    """한 사람(트랙 0, 1)이 gap_start~gap_end 사이에서 잠깐 끊긴 프로젝트 (10fps)."""
+    p = make(tmp_path)
+    x2 = 100 if x2 is None else x2
+    p.auto[0] = AutoTrack(list(range(gap_start)), [[100, 100, 140, 140, 0.9]] * gap_start, ["auto"] * gap_start)
+    p.auto[1] = AutoTrack(list(range(gap_end, 100)), [[x2, 100, x2 + 40, 140, 0.9]] * (100 - gap_end),
+                          ["auto"] * (100 - gap_end))
+    p.tracks[1].person = 0
+    p.persons = {0: Person("A", [0, 1], [])}
+    p._touch(0, 1)
+    return p
+
+
+def test_short_gap_is_bridged(tmp_path):
+    p = _two_pieces(tmp_path, x2=120)
+    assert p.person_frames(0) == list(range(100))
+    tid, b, src = p.boxes_by_frame()[44][0]
+    assert src == "interp" and b[0] == pytest.approx(100 + 20 * 5 / 9)  # 앞뒤 상자 사이를 보간
+
+
+def test_long_gap_cut_removed_or_far_not_bridged(tmp_path):
+    assert len(_two_pieces(tmp_path, 40, 60).person_frames(0)) < 100  # 1초 넘게 끊김
+    p = _two_pieces(tmp_path)
+    p.cuts = [45]  # 장면 전환
+    p._touch()
+    assert len(p.person_frames(0)) < 100
+    p = _two_pieces(tmp_path)
+    p.remove_range(0, 30, 40)  # 사람이 지운 구간과 맞닿은 틈
+    p.remove_range(1, 48, 50)
+    assert not set(range(30, 50)) & set(p.person_frames(0))
+    assert len(_two_pieces(tmp_path, x2=400).person_frames(0)) < 100  # 다른 자리 (같은 사람이 아닐 수 있음)
