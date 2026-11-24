@@ -54,7 +54,7 @@ app = BUNDLE(
         }, {
             "CFBundleTypeName": "Video",
             "CFBundleTypeRole": "Editor",
-            "LSHandlerRank": "Alternate",
+            "LSHandlerRank": "None",  # 영상은 "다음으로 열기"에만. 기본 앱으로 뽑히지 않게
             "LSItemContentTypes": ["public.movie", "public.mpeg-4", "com.apple.quicktime-movie",
                                    "org.matroska.mkv", "org.webmproject.webm"],
         }],
