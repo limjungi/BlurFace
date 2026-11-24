@@ -309,3 +309,44 @@ def test_export_dialog_options(app, opened):
     assert (o.codec, o.quality, o.height) == ("h264", "small", 720)
     assert "MB" in dlg.info.text() and "1280×720" in dlg.info.text()
     assert dlg.out_path().endswith("_mosaic.mp4")
+
+
+def test_blade_tool_click_and_backspace_removes_part(app, opened):
+    w = opened
+    p = w.project
+    tl = w.timeline
+    pid = tl.rows[1].pid
+    frames = sorted(p.person_frames(pid))
+    a, b = frames[10], frames[40]
+    w.act_tool_blade.trigger()
+    assert tl.tool == "blade"
+    _press(tl, tl._x(a), _row_y(tl, 1))
+    _press(tl, tl._x(b), _row_y(tl, 1))
+    sp = p.persons[pid].splits
+    assert len(sp) == 2 and abs(sp[0] - a) <= 2 and abs(sp[1] - b) <= 2
+    w.act_tool_select.trigger()
+    w._on_piece_clicked(pid, (a + b) // 2)
+    before = len(p.person_frames(pid))
+    w.delete_key()
+    piece = p.piece_at(pid, (a + b) // 2)
+    gone = set(range(*piece)) & set(p.person_frames(pid))
+    assert not gone and len(p.person_frames(pid)) < before
+    w.undo()
+    assert len(p.person_frames(pid)) == before
+
+
+def test_trim_drag_previews_bar(app, opened):
+    tl = opened.timeline
+    r = tl.rows[1]
+    a, b = r.presence[0]
+    tl._drag = {"mode": "trim", "orig": b, "new": b - 20, "row": 1}
+    assert tl._preview(r).presence[0] == (a, b - 20)
+    tl._drag = None
+
+
+def test_speed_and_seekbar(app, opened):
+    w = opened
+    w.set_speed(2.0)
+    assert w.speed == 2.0 and w.speed_btns[2.0].isChecked() and not w.speed_btns[1.0].isChecked()
+    w.seekbar.seek.emit(300)
+    assert w.frame == 300 and w.seekbar.pos == 300
