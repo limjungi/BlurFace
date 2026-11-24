@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self._build_body()
         self._build_status()
         self._build_shortcuts()
+        self._build_menubar()
         self._refresh_inspector()
         self._update_enabled()
 
@@ -373,13 +374,75 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self.cancel_btn)
 
     def _build_shortcuts(self):
-        for key, fn in [("Space", self.toggle_play), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)),
-                        ("Shift+Left", lambda: self.step(-round(self.fps))),
-                        ("Shift+Right", lambda: self.step(round(self.fps))),
-                        ("I", self.mark_in), ("O", self.mark_out),
-                        ("Backspace", self.delete_key), ("Delete", self.delete_key),
+        for key, fn in [("I", self.mark_in), ("O", self.mark_out),
                         ("S", lambda: self._track_edit("split")), ("Escape", self._escape)]:
             QShortcut(QKeySequence(key), self, activated=fn)
+
+    def _build_menubar(self):
+        """맥 화면 맨 위 메뉴. 도구 막대·단축키와 같은 동작(QAction)을 그대로 씀."""
+        def act(text, fn, shortcut=None, *more):
+            a = QAction(text, self, triggered=fn)
+            if shortcut:
+                a.setShortcuts([QKeySequence(k) for k in (shortcut, *more)])
+            self.addAction(a)
+            return a
+        self.act_play = act("재생 / 일시 정지", self.toggle_play, "Space")
+        self.act_prev = act("한 프레임 뒤로", lambda: self.step(-1), "Left")
+        self.act_next_f = act("한 프레임 앞으로", lambda: self.step(1), "Right")
+        self.act_prev_s = act("1초 뒤로", lambda: self.step(-round(self.fps)), "Shift+Left")
+        self.act_next_s = act("1초 앞으로", lambda: self.step(round(self.fps)), "Shift+Right")
+        self.act_start = act("처음으로", lambda: self.seek(0), "Home")
+        self.act_delete = act("선택한 부분 지우기", self.delete_key, "Backspace", "Delete")
+        self.act_unsplit = act("다시 하나로 합치기", self._clear_splits)
+        self.act_rename = act("이름 바꾸기", lambda: self._rename(self.selected) if self.project and self.selected in self.project.persons else None)
+        self.act_speed = {}
+        for sp, key in ((0.5, "Ctrl+1"), (1.0, "Ctrl+2"), (2.0, "Ctrl+3")):
+            a = act(f"{sp:g}배속", lambda _=False, v=sp: self.set_speed(v), key)
+            a.setCheckable(True)
+            a.setChecked(sp == 1.0)
+            self.act_speed[sp] = a
+        self.act_about = QAction("BlurFace에 관하여", self, triggered=lambda: QMessageBox.about(
+            self, "BlurFace", "영상 속 얼굴을 자동으로 찾아 가려 주는 앱"))
+        self.act_about.setMenuRole(QAction.MenuRole.AboutRole)
+        self.act_notify = QAction("끝나면 알림 보내기", self, checkable=True)
+        self.act_notify.setChecked(QSettings("BlurFace", "BlurFace").value("notify", True, type=bool))
+        self.act_notify.toggled.connect(lambda on: QSettings("BlurFace", "BlurFace").setValue("notify", on))
+
+        mb = self.menuBar()
+        m = mb.addMenu("파일")
+        m.addAction(self.act_about)
+        for a in (self.act_open, self.act_export, None, self.act_reanalyze, self.act_restore, None, self.act_notify):
+            m.addSeparator() if a is None else m.addAction(a)
+        m = mb.addMenu("편집")
+        for a in (self.act_undo, self.act_redo, None, self.act_blade, self.act_unsplit, self.act_delete, None,
+                  self.act_rename, self.act_boxes):
+            m.addSeparator() if a is None else m.addAction(a)
+        self.act_tool_select.setText("선택 도구")
+        self.act_tool_blade.setText("자르기 도구")
+        self.act_tool_select.setIconText("선택")
+        self.act_tool_blade.setIconText("자르기")
+        m = mb.addMenu("도구")
+        for a in (self.act_tool_select, self.act_tool_blade):
+            m.addAction(a)
+        m = mb.addMenu("재생")
+        for a in (self.act_play, None, self.act_prev, self.act_next_f, self.act_prev_s, self.act_next_s, self.act_start,
+                  None, *self.act_speed.values(), None, self.act_next):
+            m.addSeparator() if a is None else m.addAction(a)
+        m = mb.addMenu("보기")
+        self.act_zoom_in.setText("타임라인 확대")
+        self.act_zoom_out.setText("타임라인 축소")
+        for a in (self.act_zoom_in, self.act_zoom_out, self.act_zoom_fit, None, self.act_full):
+            m.addSeparator() if a is None else m.addAction(a)
+        self.act_zoom_in.setIconText("+")
+        self.act_zoom_out.setIconText("−")
+
+    def _notify(self, title: str, text: str):
+        """창을 보고 있지 않을 때만 알림 센터 + Dock 아이콘 튀기기."""
+        if self.isActiveWindow() or not self.act_notify.isChecked():
+            return
+        from .notify import notify
+        notify(title, text)
+        QApplication.alert(self)
 
     def _update_enabled(self):
         has_video = self.source is not None
@@ -497,6 +560,7 @@ class MainWindow(QMainWindow):
         self._set_project(project)
         self.status_label.setText(f"분석 완료 · 인물 {len(project.persons)}명 · 장면 전환 {len(project.cuts)}개 "
                                   f"({project.timings.get('total_analyze', 0):.0f}초)")
+        self._notify("분석 완료", f"인물 {len(project.persons)}명을 찾았어요. 효과를 확인해 보세요.")
 
     def _set_project(self, project: Project):
         self.project = project
@@ -540,7 +604,8 @@ class MainWindow(QMainWindow):
             self._update_enabled()
 
         w.progress.connect(on_progress)
-        w.failed.connect(lambda msg: (finish(), QMessageBox.warning(self, "오류", msg)))
+        w.failed.connect(lambda msg: (finish(), self._notify("문제가 생겼어요", msg[:120]),
+                                      QMessageBox.warning(self, "오류", msg)))
         w.cancelled.connect(lambda: (finish(), self.status_label.setText("취소했습니다")))
         w.done.connect(lambda *_: finish())
         self.progress.setValue(0)
@@ -1141,6 +1206,8 @@ class MainWindow(QMainWindow):
         self.speed = speed
         for v, b in self.speed_btns.items():
             b.setChecked(v == speed)
+        for v, a in getattr(self, "act_speed", {}).items():
+            a.setChecked(v == speed)
         if self.play_timer.isActive():
             self._play_start = (time.perf_counter(), self.frame)
 
@@ -1220,6 +1287,7 @@ class MainWindow(QMainWindow):
 
     def _on_exported(self, out: str, secs: float):
         self.status_label.setText(f"내보내기 완료 ({secs:.0f}초): {out}")
+        self._notify("내보내기 완료", f"{Path(out).name} ({secs:.0f}초)")
         box = QMessageBox(self)
         box.setWindowTitle("내보내기 완료")
         box.setText(f"{Path(out).name}\n({secs:.0f}초 걸림)")
