@@ -268,3 +268,17 @@ def test_export_options_size_and_bitrate():
     assert small < hi / 10  # 화질·해상도 모두 줄이면 훨씬 작게
     assert ExportOptions(codec="h264").bitrate(v) > hi  # H.264는 같은 화질에 더 많이
     assert ExportOptions(codec="h264").high_bit(v) is False and ExportOptions().high_bit(v) is True
+
+
+def test_tool_found_without_homebrew_in_path(monkeypatch):
+    """Finder에서 연 앱은 PATH에 Homebrew가 없어도 ffmpeg를 찾아야 함."""
+    from pathlib import Path
+
+    from blurface import video
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    if not any(Path(d, "ffmpeg").exists() for d in video.TOOL_DIRS):
+        pytest.skip("Homebrew ffmpeg 없음")
+    assert video.tool("ffmpeg").endswith("/ffmpeg")
+    monkeypatch.setattr(video, "TOOL_DIRS", ())
+    with pytest.raises(RuntimeError, match="brew install ffmpeg"):
+        video.tool("ffmpeg")
