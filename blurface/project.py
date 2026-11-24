@@ -26,7 +26,7 @@ BACKUP_KEEP = 10  # 백업을 최근 몇 개까지 남길지
 VERSION = 3  # 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
-DEFAULT_EFFECT = {"type": "mosaic", "value": 8}
+DEFAULT_EFFECT = {"type": "blur", "value": 30.0, "shape": "ellipse", "feather": 20.0}
 
 
 OPTION_KEYS = ("shape", "feather", "scale")
@@ -347,9 +347,9 @@ class Project:
         self._per = None
 
     # ---------- 검토가 필요한 곳 ----------
-    def review_points(self) -> list[tuple[int, str]]:
-        """자동 추적이 틀렸을 수 있는 위치 (프레임, 이유)."""
-        pts: list[tuple[int, str]] = []
+    def review_points(self) -> list[tuple[int, int, str]]:
+        """자동 추적이 틀렸을 수 있는 위치 (프레임, 인물, 이유)."""
+        pts: list[tuple[int, int, str]] = []
         min_gap = max(3, round(self.video.fps * 0.2))
         for tid, t in self.tracks.items():
             boxes = self.track_boxes(tid)
@@ -357,7 +357,7 @@ class Project:
                 continue
             frames = sorted(boxes)
             if t.person in self.persons and self.needs_review(t.person):
-                pts.append((frames[0], f"인물 #{t.person} 확인 필요"))
+                pts.append((frames[0], t.person, f"{self.persons[t.person].name}: 얼굴이 맞는지 확인"))
             run_start, run_kind, run_len = None, None, 0
             for f in frames + [None]:
                 b = boxes.get(f) if f is not None else None
@@ -369,8 +369,8 @@ class Project:
                 if kind == run_kind and kind is not None and f == run_start + run_len:
                     run_len += 1
                     continue
-                if run_kind and run_len >= min_gap:
-                    pts.append((run_start, f"#{t.person} {run_kind}"))
+                if run_kind and run_len >= min_gap and t.person in self.persons:
+                    pts.append((run_start, t.person, f"{self.persons[t.person].name}: {run_kind}"))
                 run_start, run_kind, run_len = f, kind, 1
         return sorted(set(pts))
 
