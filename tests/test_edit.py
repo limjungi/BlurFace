@@ -158,3 +158,62 @@ def test_backups_keep_only_recent(tmp_path, monkeypatch):
     for _ in range(5):
         Project.backup(p.video.path)
     assert len(Project.backups(p.video.path)) == 3
+
+
+HEART = {"type": "sticker", "value": "heart"}
+SMILE = {"type": "sticker", "value": "smile"}
+
+
+def test_split_then_piece_effect(tmp_path):
+    p = make(tmp_path)
+    assert p.split(0, 20) and p.split(0, 40) and not p.split(0, 20)
+    assert p.pieces(0) == [(0, 20), (20, 40), (40, 100)]
+    a, b = p.piece_at(0, 25)
+    p.set_piece_effect(0, a, b, HEART)
+    assert p.effect_for(0, 19) == p.default_effect and p.effect_for(0, 25) == HEART and p.effect_for(0, 40) == p.default_effect
+    p.set_piece_effect(0, 20, 40, None)  # 조각을 다시 기본으로
+    assert p.persons[0].segments == []
+
+
+def test_move_split_resizes_pieces_and_clamps(tmp_path):
+    p = make(tmp_path)
+    p.split(0, 20)
+    p.split(0, 40)
+    p.set_piece_effect(0, 20, 40, HEART)
+    assert p.move_split(0, 40, 50) == 50
+    assert p.persons[0].segments == [{"start": 20, "end": 50, "effect": HEART}]
+    assert p.move_split(0, 20, 70) == 49  # 옆 자른 곳(50)을 넘지 못함
+
+
+def test_unsplit_merges_same_effect(tmp_path):
+    p = make(tmp_path)
+    p.add_segment(0, 10, 30, HEART)
+    p.add_segment(0, 30, 50, HEART)
+    p.unsplit(0, 30)
+    assert p.persons[0].segments == [{"start": 10, "end": 50, "effect": HEART}]
+    p.add_segment(0, 60, 70, SMILE)
+    assert p.persons[0].splits == [10, 50, 60, 70]
+
+
+def test_trim_and_restore_ends(tmp_path):
+    p = make(tmp_path)
+    p.remove_range(0, 0, 10)  # 시작을 10으로 줄임
+    assert min(p.track_boxes(0)) == 10
+    p.restore_range(0, 5, 10)  # 다시 5까지 늘림
+    assert min(p.track_boxes(0)) == 5 and p.tracks[0].removed == [[0, 5]]
+
+
+def test_old_project_names_and_segments_migrate(tmp_path):
+    p = make(tmp_path)
+    p.persons[0].name = "인물 0"
+    p.persons[1].name = "철수"
+    p.persons[0].segments = [{"start": 10, "end": 30, "effect": HEART}]
+    p.save()
+    d = json.loads((p.dir / "project.json").read_text())
+    d["version"] = 3
+    for v in d["persons"].values():
+        v.pop("splits")
+    (p.dir / "project.json").write_text(json.dumps(d))
+    q = Project.load(p.video.path)
+    assert q.persons[0].name == "인물 1" and q.persons[1].name == "철수"
+    assert q.persons[0].splits == [10, 30]

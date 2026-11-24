@@ -23,13 +23,13 @@ from .effects import SHAPES
 from .video import VideoInfo
 
 BACKUP_KEEP = 10  # 백업을 최근 몇 개까지 남길지
-VERSION = 3  # 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
+VERSION = 4  # 4: 인물 번호 1부터·자르기(splits) / 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
 DEFAULT_EFFECT = {"type": "blur", "value": 30.0, "shape": "ellipse", "feather": 20.0}
 
 
-OPTION_KEYS = ("shape", "feather", "scale")
+OPTION_KEYS = ("shape", "feather", "scale", "under")
 
 
 def parse_effect(spec: str) -> dict:
@@ -58,6 +58,8 @@ def parse_effect(spec: str) -> dict:
         e["feather"] = min(50.0, max(0.0, float(opts["feather"])))
     if "scale" in opts:
         e["scale"] = min(300.0, max(50.0, float(opts["scale"])))
+    if "under" in opts:
+        e["under"] = opts["under"].lower() in ("1", "true", "yes", "on")
     return e
 
 
@@ -106,6 +108,7 @@ class Person:
     effect: dict | None = None  # None이면 기본 효과
     # 구간 효과: [{"start": 시작 프레임, "end": 끝 프레임(포함 안 함), "effect": {...}}]. 겹치면 나중 것이 우선
     segments: list[dict] = field(default_factory=list)
+    splits: list[int] = field(default_factory=list)  # 타임라인 자른 위치 (조각마다 다른 효과)
 
 
 @dataclass
@@ -147,7 +150,80 @@ class Project:
     def add_segment(self, pid: int, start: int, end: int, effect: dict):
         start, end = max(0, min(start, end)), min(self.n_frames, max(start, end))
         if end > start:
-            self.persons[pid].segments.append({"start": start, "end": end, "effect": effect})
+            self.split(pid, start)
+            self.split(pid, end)
+            self.set_piece_effect(pid, start, end, effect)
+
+    @staticmethod
+    def default_name(pid: int) -> str:
+        return f"인물 {pid + 1}"  # 화면에는 1번부터
+
+    # ---------- 자르기 (파이널컷의 블레이드처럼 인물 줄을 잘라 조각마다 효과) ----------
+    def pieces(self, pid: int) -> list[tuple[int, int]]:
+        cuts = [0, *sorted(self.persons[pid].splits), self.n_frames]
+        return [(a, b) for a, b in zip(cuts, cuts[1:]) if b > a]
+
+    def piece_at(self, pid: int, frame: int) -> tuple[int, int]:
+        for a, b in self.pieces(pid):
+            if a <= frame < b:
+                return a, b
+        return 0, self.n_frames
+
+    def split(self, pid: int, frame: int) -> bool:
+        sp = self.persons[pid].splits
+        if 0 < frame < self.n_frames and frame not in sp:
+            sp.append(frame)
+            sp.sort()
+            return True
+        return False
+
+    def unsplit(self, pid: int, frame: int):
+        """자른 곳을 없앤다. 양쪽 효과가 같으면 하나로 합친다."""
+        person = self.persons[pid]
+        if frame not in person.splits:
+            return
+        person.splits.remove(frame)
+        left = next((s for s in person.segments if s["end"] == frame), None)
+        right = next((s for s in person.segments if s["start"] == frame), None)
+        if left and right and left["effect"] == right["effect"]:
+            left["end"] = right["end"]
+            person.segments.remove(right)
+
+    def move_split(self, pid: int, old: int, new: int) -> int:
+        """자른 곳을 옮긴다 (조각 길이 조절). 옆 자른 곳을 넘지 못하게 막고 실제 위치를 돌려준다."""
+        person = self.persons[pid]
+        sp = sorted(person.splits)
+        if old not in sp:
+            return old
+        i = sp.index(old)
+        lo = (sp[i - 1] if i else 0) + 1
+        hi = (sp[i + 1] if i + 1 < len(sp) else self.n_frames) - 1
+        new = max(lo, min(hi, new))
+        sp[i] = new
+        person.splits = sp
+        for seg in person.segments:
+            if seg["start"] == old:
+                seg["start"] = new
+            if seg["end"] == old:
+                seg["end"] = new
+        person.segments = [s for s in person.segments if s["end"] > s["start"]]
+        return new
+
+    def set_piece_effect(self, pid: int, a: int, b: int, effect: dict | None):
+        """[a, b) 구간 효과를 바꾼다. None이면 그 인물의 기본 효과로."""
+        person = self.persons[pid]
+        segs = []
+        for s in person.segments:
+            if s["end"] <= a or s["start"] >= b:
+                segs.append(s)
+                continue
+            if s["start"] < a:
+                segs.append({**s, "end": a})
+            if s["end"] > b:
+                segs.append({**s, "start": b})
+        if effect is not None:
+            segs.append({"start": a, "end": b, "effect": effect})
+        person.segments = sorted(segs, key=lambda s: s["start"])
 
     def frame_at(self, seconds: float) -> int:
         """시각(초) → 프레임 번호."""
@@ -264,7 +340,7 @@ class Project:
 
     def new_person(self, name: str | None = None, thumb: list[float] | None = None) -> int:
         pid = max(self.persons, default=-1) + 1
-        self.persons[pid] = Person(name or f"인물 {pid}", [], thumb or [])
+        self.persons[pid] = Person(name or self.default_name(pid), [], thumb or [])
         return pid
 
     def add_manual_track(self, frame: int, box: list[float], pid: int | None = None) -> int:
@@ -288,6 +364,20 @@ class Project:
             else:
                 merged.append([a, b])
         self.tracks[tid].removed = merged
+        self._touch(tid)
+
+    def restore_range(self, tid: int, start: int, end: int):
+        """지운 구간 중 [start, end)를 되살린다 (끝을 다시 늘릴 때)."""
+        out = []
+        for a, b in self.tracks[tid].removed:
+            if b <= start or a >= end:
+                out.append([a, b])
+                continue
+            if a < start:
+                out.append([a, start])
+            if b > end:
+                out.append([end, b])
+        self.tracks[tid].removed = out
         self._touch(tid)
 
     def remove_track(self, tid: int):
@@ -463,11 +553,12 @@ class Project:
         if not path.exists():
             return None
         d = json.loads(path.read_text())
-        if d.get("version") == 2:  # 이전 형식: 트랙 = 자동 결과. 수정 없는 새 형식으로 옮긴다
+        version = d.get("version")
+        if version == 2:  # 이전 형식: 트랙 = 자동 결과. 수정 없는 새 형식으로 옮긴다
             d["auto"] = {k: {"frames": t["frames"], "boxes": t["boxes"], "sources": t["sources"]}
                          for k, t in d["tracks"].items()}
             d["tracks"] = {k: {"person": t["person"], "auto": int(k)} for k, t in d["tracks"].items()}
-        elif d.get("version") != VERSION:
+        elif version not in (3, VERSION):
             return None
         p = cls(VideoInfo(**d["video"]), d["n_frames"], d["cuts"], default_effect=d["default_effect"],
                 timings=d.get("timings", {}), pts=d.get("pts", []))
@@ -480,4 +571,12 @@ class Project:
             v["keys"] = {int(f): b for f, b in v.get("keys", {}).items()}
             p.tracks[int(k)] = Track(**v)
         p._reindex(drop_empty=False)
+        if version < 4:
+            for pid, person in p.persons.items():
+                if person.name == f"인물 {pid}":  # 예전 기본 이름(0번부터) → 1번부터
+                    person.name = cls.default_name(pid)
+        for person in p.persons.values():  # 자른 곳이 없던 예전 구간 효과는 경계를 자른 곳으로
+            if not person.splits:
+                person.splits = sorted({x for s in person.segments for x in (s["start"], s["end"])
+                                        if 0 < x < p.n_frames})
         return p

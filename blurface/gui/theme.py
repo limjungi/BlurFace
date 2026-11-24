@@ -22,6 +22,18 @@ QToolButton#preset {{ background: #2c2c2e; border: 1px solid transparent; border
                       font-size: 11px; color: #d1d1d6; }}
 QToolButton#preset:hover {{ background: #3a3a3c; }}
 QToolButton#preset:checked {{ background: rgba(10, 132, 255, 0.22); border: 1px solid {ACCENT}; color: white; }}
+QToolButton#seg {{ background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 6px; padding: 5px 6px;
+                   font-size: 11px; color: #d1d1d6; }}
+QToolButton#seg:checked {{ background: rgba(10, 132, 255, 0.22); border: 1px solid {ACCENT}; color: white; }}
+QToolButton#thumb {{ background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px; font-size: 20px; color: #8e8e93; }}
+QToolButton#thumb:hover {{ background: #3a3a3c; }}
+QToolButton#thumb:checked {{ border: 2px solid {ACCENT}; }}
+QSlider::groove:horizontal {{ height: 4px; background: #3a3a3c; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: #f2f2f7; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }}
+QCheckBox {{ color: #d1d1d6; spacing: 6px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid #48484a; background: #2c2c2e; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT}; }}
 QPushButton {{ background: #3a3a3c; border: none; border-radius: 6px; padding: 6px 12px; }}
 QPushButton:hover {{ background: #48484a; }}
 QPushButton:pressed {{ background: #545458; }}
@@ -45,6 +57,8 @@ QTableWidget {{ background: #2c2c2e; border: none; border-radius: 8px; gridline-
 QHeaderView::section {{ background: #2c2c2e; color: #8e8e93; border: none; padding: 4px 6px; font-size: 11px; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: #48484a; border-radius: 4px; min-height: 24px; margin: 2px; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
+QScrollBar::handle:horizontal {{ background: #48484a; border-radius: 4px; min-width: 24px; margin: 2px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QMenu {{ background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px; padding: 5px; }}

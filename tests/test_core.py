@@ -208,3 +208,21 @@ def test_parse_effect_options():
         parse_effect("blur,shape=star")
     from blurface.project import effect_label
     assert parse_effect(effect_label(e)) == e
+
+
+def test_image_has_no_blur_underneath_by_default(tmp_path):
+    import cv2
+    png = tmp_path / "s.png"
+    st = np.zeros((100, 100, 4), np.uint8)
+    cv2.circle(st, (50, 50), 30, (0, 255, 0, 255), -1)  # 가운데 원만 보이고 나머지는 투명
+    cv2.imwrite(str(png), st)
+    from blurface.effects import load_image
+    assert load_image(str(png)).shape[:2] == (61, 61)  # 투명 여백 잘림
+    img = _noise()
+    before = img.copy()
+    apply(img, [100, 100, 200, 200], parse_effect(f"image:{png}"))
+    corner = (slice(101, 106), slice(101, 106))  # 원 바깥(투명) → 원본 그대로
+    assert np.array_equal(img[corner], before[corner])
+    img2 = before.copy()
+    apply(img2, [100, 100, 200, 200], parse_effect(f"image:{png},under=1"))
+    assert not np.array_equal(img2[corner], before[corner])  # 옵션을 켜면 흐림

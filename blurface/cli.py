@@ -8,7 +8,7 @@
 
 효과 지정 (run/render 공통)
   --effect blur:40                            모든 인물 기본 효과
-  --person 2=sticker:smile --person 0=none    인물별 효과 (설정은 프로젝트에 저장됨)
+  --person 2=sticker:smile --person 1=none    인물별 효과 (설정은 프로젝트에 저장됨)
   --person-at 2@12-20=sticker:heart           인물 2만 12~20초 동안 다른 효과 (시각: 초, 1:05, 1:05.5)
   --clear-at 2                                인물 2의 구간 효과 모두 지우기
   효과: mosaic[:블록수] blur[:강도] solid[:#색] sticker[:smile|heart] image:파일.png none
@@ -52,16 +52,17 @@ def parse_time(text: str) -> float:
 
 
 def _person_id(p: Project, text: str) -> int:
-    pid = int(text.strip().lstrip("#P"))
-    if pid not in p.persons:
-        raise SystemExit(f"인물 #{pid} 없음 (blurface persons 로 목록 확인)")
-    return pid
+    num = int(text.strip().lstrip("#P"))  # 화면과 같이 1번부터
+    if num - 1 not in p.persons:
+        raise SystemExit(f"인물 #{num} 없음 (blurface persons 로 목록 확인)")
+    return num - 1
 
 
 def _apply_effect_options(p: Project, args) -> bool:
     changed = False
     for spec in getattr(args, "clear_at", None) or []:
-        p.persons[_person_id(p, spec)].segments = []
+        person = p.persons[_person_id(p, spec)]
+        person.segments, person.splits = [], []
         changed = True
     if getattr(args, "effect", None):
         p.default_effect = parse_effect(args.effect)
@@ -89,7 +90,7 @@ def _print_persons(p: Project):
         secs = len(p.person_frames(pid)) / p.video.fps
         mark = "" if person.effect else " (기본)"
         warn = "  ⚠ 확인 필요" if p.needs_review(pid) else ""
-        print(f"  #{pid:<3} {secs:6.1f}초  트랙 {len(person.tracks):<3} {effect_label(p.effect_for(pid))}{mark}{warn}")
+        print(f"  #{pid + 1:<3} {secs:6.1f}초  트랙 {len(person.tracks):<3} {effect_label(p.effect_for(pid))}{mark}{warn}")
         for seg in person.segments:
             print(f"        {p.time_of(seg['start']):6.2f}~{p.time_of(seg['end']):6.2f}초  {effect_label(seg['effect'])}")
     print(f"얼굴 목록 이미지: {p.dir / 'persons.jpg'}")

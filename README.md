@@ -16,14 +16,15 @@ uv sync && scripts/download_models.sh
 uv run blurface gui                             # 화면으로 열기
 uv run blurface run 영상.mp4                    # 영상_mosaic.mp4 생성
 uv run blurface persons 영상.mp4                # 인물 번호 확인 (영상.blurface/persons.jpg)
-uv run blurface render 영상.mp4 --person 0=sticker:smile --person 3=none
-uv run blurface render 영상.mp4 --person-at 0@12-20=sticker:heart   # 인물 0만 12~20초 하트
+uv run blurface render 영상.mp4 --person 1=sticker:smile --person 4=none
+uv run blurface render 영상.mp4 --person-at 1@12-20=sticker:heart   # 인물 1만 12~20초 하트
 ```
 화면 사용법 (파이널컷과 비슷한 배치)
-- 아래 타임라인에 인물마다 한 줄. 막대 색이 그 사람에게 걸린 효과 (기본: 타원 블러)
-- 줄 왼쪽 효과 버튼을 누르거나 오른쪽 설정에서 효과 변경. 맨 위 "모든 인물" 줄 = 기본 효과
-- 인물 줄을 옆으로 끌면 그 시간만 다른 효과. 우클릭으로 이름 바꾸기·합치기(⌘-클릭으로 여럿 선택)·삭제
-- `B` 상자 편집: 상자를 끌어 옮기기·모서리로 크기·빈 곳을 끌어 놓친 얼굴 추가. `N` 확인할 곳, `⌘Z` 실행 취소
+- 아래 타임라인에 인물마다 한 줄. 막대 색 = 그 사람에게 걸린 효과 (기본: 타원 블러). 맨 위 "모든 인물" 줄 = 기본 효과
+- 효과 칩(`블러 ▾`)이나 오른쪽 설정에서 효과 변경. 내 이미지는 한 번 올리면 보관함에 저장
+- `⌘B` 재생 위치에서 인물 줄 자르기 → 조각을 눌러 그 부분만 다른 효과. 자른 곳·막대 끝은 좌우로 끌어 길이 조절
+- 핀치 또는 ⌘+스크롤로 타임라인 확대/축소, 이름 더블클릭으로 이름 바꾸기, 우클릭 메뉴(합치기·삭제)
+- `F` 전체 화면, `B` 상자 편집(놓친 얼굴 그리기·옮기기), `N` 확인할 곳, `⌘Z` 실행 취소
 
 효과: `mosaic[:블록수]` `blur[:강도]` `solid[:#색]` `sticker[:smile|heart]` `image:파일.png` `none`
 옵션(쉼표로 이어 붙임): `shape=rect|rounded|ellipse` 모양, `feather=0~50` 가장자리 부드럽게, `scale=50~300` 가리는 범위(%)
