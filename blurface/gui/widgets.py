@@ -1103,7 +1103,7 @@ class EffectPicker(QWidget):
 
     def _pick_image(self) -> bool:
         from .. import library
-        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 올리기", "", "이미지 (*.png *.jpg *.jpeg *.webp)")
+        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 올리기", "", "이미지 (*.png *.jpg *.jpeg *.webp *.gif)")
         if not path:
             return False
         self._use_image(str(library.add(path)))

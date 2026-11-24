@@ -644,7 +644,7 @@ class MainWindow(QMainWindow):
             self.set_effect(self.selected, self.picker.effect())
 
     def _ask_image(self) -> str:
-        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 선택", "", "이미지 (*.png *.jpg *.jpeg *.webp)")
+        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 선택", "", "이미지 (*.png *.jpg *.jpeg *.webp *.gif)")
         return path
 
     def _preset(self, key: str, prev: dict | None) -> dict | None | bool:

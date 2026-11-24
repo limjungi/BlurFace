@@ -26,7 +26,7 @@ uv run blurface render 영상.mp4 --person-at 1@12-20=sticker:heart   # 인물 1
 - 핀치 또는 ⌘+스크롤로 타임라인 확대/축소, 이름 더블클릭으로 이름 바꾸기, 우클릭 메뉴(합치기·삭제)
 - `F` 전체 화면, `B` 상자 편집(놓친 얼굴 그리기·옮기기), `N` 확인할 곳, `⌘Z` 실행 취소
 
-효과: `mosaic[:블록수]` `blur[:강도]` `solid[:#색]` `sticker[:smile|heart]` `image:파일.png` `none`
+효과: `mosaic[:블록수]` `blur[:강도]` `solid[:#색]` `sticker[:smile|heart]` `image:파일.png|gif` `none` (GIF는 움직임)
 옵션(쉼표로 이어 붙임): `shape=rect|rounded|ellipse` 모양, `feather=0~50` 가장자리 부드럽게, `scale=50~300` 가리는 범위(%)
 예: `--person 2=blur:40,shape=ellipse,feather=20`
 

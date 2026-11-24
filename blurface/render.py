@@ -26,7 +26,7 @@ def compose(img: np.ndarray, frame: int, p: Project, per: dict, scale: float = 1
         pid = p.tracks[tid].person
         effect = p.effect_for(pid, frame)
         area = cover_box([x * scale for x in b[:4]], effect)
-        apply(img, area, effect)
+        apply(img, area, effect, p.time_of(frame))
         if debug:
             box = clip_box(area, w, h)
             color = tuple(c * hi for c in SOURCE_COLORS[src])

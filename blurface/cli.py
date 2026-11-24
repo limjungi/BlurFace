@@ -11,7 +11,7 @@
   --person 2=sticker:smile --person 1=none    인물별 효과 (설정은 프로젝트에 저장됨)
   --person-at 2@12-20=sticker:heart           인물 2만 12~20초 동안 다른 효과 (시각: 초, 1:05, 1:05.5)
   --clear-at 2                                인물 2의 구간 효과 모두 지우기
-  효과: mosaic[:블록수] blur[:강도] solid[:#색] sticker[:smile|heart] image:파일.png none
+  효과: mosaic[:블록수] blur[:강도] solid[:#색] sticker[:smile|heart] image:파일.png|gif none
 """
 
 from __future__ import annotations
