@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout, QGroupBox,
+                               QInputDialog,
                                QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
@@ -73,12 +74,14 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         self.act_open = QAction("열기", self, shortcut=QKeySequence.StandardKey.Open, triggered=self.open_dialog)
         self.act_reanalyze = QAction("다시 분석", self, triggered=self.reanalyze)
+        self.act_restore = QAction("이전 상태로 되돌리기", self, triggered=self.restore_dialog)
+        self.act_restore.setToolTip("다시 분석하기 전 상태(고친 상자·효과 설정)로 되돌립니다")
         self.act_export = QAction("내보내기", self, shortcut="Ctrl+E", triggered=self.export)
         self.act_undo = QAction("실행 취소", self, shortcut=QKeySequence.StandardKey.Undo, triggered=self.undo)
         self.act_redo = QAction("다시 실행", self, shortcut=QKeySequence.StandardKey.Redo, triggered=self.redo)
         self.act_boxes = QAction("상자 편집", self, checkable=True, shortcut="B", triggered=self._toggle_boxes)
         self.act_next = QAction("다음 확인 지점", self, shortcut="N", triggered=self.next_review)
-        for a in (self.act_open, self.act_reanalyze, self.act_export):
+        for a in (self.act_open, self.act_reanalyze, self.act_restore, self.act_export):
             tb.addAction(a)
         tb.addSeparator()
         for a in (self.act_undo, self.act_redo):
@@ -259,6 +262,7 @@ class MainWindow(QMainWindow):
         has_project = self.project is not None
         busy = self.worker is not None
         self.act_reanalyze.setEnabled(has_video and not busy)
+        self.act_restore.setEnabled(has_video and not busy and bool(Project.backups(self.source.info.path)))
         self.act_export.setEnabled(has_project and not busy)
         self.act_undo.setEnabled(has_project and bool(self._undo))
         self.act_redo.setEnabled(has_project and bool(self._redo))
@@ -326,10 +330,35 @@ class MainWindow(QMainWindow):
         if not self.source:
             return
         if self.project and QMessageBox.question(
-                self, "다시 분석", "다시 분석하면 인물 번호가 바뀌고 인물별 설정이 초기화됩니다. 계속할까요?") \
+                self, "다시 분석",
+                "얼굴을 처음부터 다시 찾습니다. 인물 번호가 바뀌고 고친 상자·효과 설정은 새로 시작합니다.\n\n"
+                "지금 상태는 자동으로 백업되며, 언제든 '이전 상태로 되돌리기'로 돌아올 수 있습니다. 계속할까요?") \
                 != QMessageBox.StandardButton.Yes:
             return
         self._start_analysis(self.source.info.path)
+
+    def restore_dialog(self):
+        if not self.source or self.worker:
+            return
+        backups = Project.backups(self.source.info.path)
+        if not backups:
+            QMessageBox.information(self, "되돌리기", "백업이 없습니다. 다시 분석할 때 자동으로 만들어집니다.")
+            return
+        labels = [Project.backup_summary(b) for b in backups]
+        choice, ok = QInputDialog.getItem(self, "이전 상태로 되돌리기",
+                                          "되돌릴 시점을 고르세요 (지금 상태도 백업해 둡니다):", labels, 0, False)
+        if ok:
+            self.restore_backup(backups[labels.index(choice)])
+
+    def restore_backup(self, backup: Path):
+        self.pause()
+        project = Project.restore(self.source.info.path, backup)
+        if project is None:
+            QMessageBox.warning(self, "되돌리기", "백업을 읽을 수 없습니다.")
+            return
+        self.selected = None
+        self._set_project(project)
+        self.status_label.setText(f"되돌렸습니다 · {Project.backup_summary(backup)}")
 
     def _start_analysis(self, path: str):
         self.pause()

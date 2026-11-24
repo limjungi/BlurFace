@@ -12,6 +12,8 @@ from __future__ import annotations
 import bisect
 import copy
 import json
+import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -20,6 +22,7 @@ import numpy as np
 from .effects import SHAPES
 from .video import VideoInfo
 
+BACKUP_KEEP = 10  # 백업을 최근 몇 개까지 남길지
 VERSION = 3  # 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
@@ -392,6 +395,67 @@ class Project:
         }
         path.write_text(json.dumps(data, ensure_ascii=False))
         return path
+
+    # ---------- 백업 (다시 분석하기 전 상태 보관) ----------
+    @classmethod
+    def backup(cls, video: str | Path) -> Path | None:
+        """지금 저장된 상태(project.json, 얼굴 사진)를 backups/<시각>/에 복사. 저장된 게 없으면 None."""
+        d = cls.dir_for(video)
+        if not (d / "project.json").exists():
+            return None
+        root = d / "backups"
+        dst = root / time.strftime("%Y-%m-%d_%H%M%S")
+        n = 1
+        while dst.exists():
+            n += 1
+            dst = root / f"{time.strftime('%Y-%m-%d_%H%M%S')}_{n}"
+        dst.mkdir(parents=True)
+        shutil.copy2(d / "project.json", dst / "project.json")
+        if (d / "faces").exists():
+            shutil.copytree(d / "faces", dst / "faces")
+        for old in cls.backups(video)[BACKUP_KEEP:]:
+            shutil.rmtree(old, ignore_errors=True)
+        return dst
+
+    @classmethod
+    def backups(cls, video: str | Path) -> list[Path]:
+        """백업 목록 (최신이 먼저)."""
+        root = cls.dir_for(video) / "backups"
+        if not root.exists():
+            return []
+        return sorted((b for b in root.iterdir() if (b / "project.json").exists()),
+                      key=lambda b: (b / "project.json").stat().st_mtime, reverse=True)
+
+    @staticmethod
+    def backup_summary(backup: Path) -> str:
+        """목록에 보여줄 한 줄 설명."""
+        try:
+            d = json.loads((backup / "project.json").read_text())
+        except (OSError, ValueError):
+            return backup.name
+        when = time.strftime("%m월 %d일 %H:%M", time.localtime((backup / "project.json").stat().st_mtime))
+        edits = sum(1 for t in d.get("tracks", {}).values()
+                    if t.get("keys") or t.get("removed") or ("auto" in t and t["auto"] is None))
+        effects = sum(1 for p in d.get("persons", {}).values() if p.get("effect") or p.get("segments"))
+        return f"{when} · 인물 {len(d.get('persons', {}))}명 · 효과 지정 {effects}명 · 고친 상자 {edits}개"
+
+    @classmethod
+    def restore(cls, video: str | Path, backup: Path) -> Project | None:
+        """백업으로 되돌린다. 되돌리기 직전 상태도 백업해 두어 다시 돌아올 수 있게 한다."""
+        d = cls.dir_for(video)
+        data = (backup / "project.json").read_bytes()
+        faces = backup / "faces"
+        tmp_faces = None
+        if faces.exists():  # 현재 상태 백업 중 오래된 백업이 지워질 수 있어 먼저 따로 복사
+            tmp_faces = d / ".restore_faces"
+            shutil.rmtree(tmp_faces, ignore_errors=True)
+            shutil.copytree(faces, tmp_faces)
+        cls.backup(video)
+        (d / "project.json").write_bytes(data)
+        if tmp_faces:
+            shutil.rmtree(d / "faces", ignore_errors=True)
+            tmp_faces.rename(d / "faces")
+        return cls.load(video)
 
     @classmethod
     def load(cls, video: str | Path) -> Project | None:

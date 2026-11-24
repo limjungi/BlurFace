@@ -149,6 +149,7 @@ def analyze(video: str | Path, progress=None, log=print, cancel=None) -> Project
     project = Project(info, n, cuts, tracks, persons, timings=timings, pts=[t - t_first for t in pts_list],
                       auto=autos)
     project.timings["total_analyze"] = time.perf_counter() - t0
+    Project.backup(video)  # 다시 분석이면 덮어쓰기 전 상태(고친 내용·효과 설정)를 보관
     project.save()
     write_person_sheet(project)
     log(f"분석 완료: {n}프레임, 컷 {len(cuts)}개, 트랙 {len(tracks)}개, 인물 {len(persons)}명 "

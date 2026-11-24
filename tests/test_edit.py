@@ -124,3 +124,37 @@ def test_load_v2_project_migrates(tmp_path):
     q = Project.load(p.video.path)
     assert q.tracks[0].auto == 0 and q.auto[0].frames == [1, 2]
     assert box(q, 0, 2) == [0, 0, 5, 5]
+
+
+def test_backup_and_restore_roundtrip(tmp_path):
+    p = make(tmp_path)
+    assert Project.backup(p.video.path) is None  # 저장된 게 없으면 백업 안 함
+    p.persons[0].effect = {"type": "sticker", "value": "heart"}
+    p.set_key(0, 10, [0, 0, 5, 5])
+    p.save()
+    (p.dir / "faces").mkdir()
+    (p.dir / "faces" / "0.jpg").write_bytes(b"old")
+    b = Project.backup(p.video.path)
+    assert "효과 지정 1명" in Project.backup_summary(b) and "고친 상자 1개" in Project.backup_summary(b)
+    # 다시 분석했다고 치고 덮어쓰기
+    p.persons[0].effect = None
+    p.clear_key(0)
+    p.save()
+    (p.dir / "faces" / "0.jpg").write_bytes(b"new")
+    q = Project.restore(p.video.path, b)
+    assert q.persons[0].effect == {"type": "sticker", "value": "heart"} and q.tracks[0].keys
+    assert (p.dir / "faces" / "0.jpg").read_bytes() == b"old"
+    # 되돌리기 직전 상태도 백업돼 있어 다시 돌아갈 수 있음
+    latest = Project.backups(p.video.path)[0]
+    r = Project.restore(p.video.path, latest)
+    assert r.persons[0].effect is None and (p.dir / "faces" / "0.jpg").read_bytes() == b"new"
+
+
+def test_backups_keep_only_recent(tmp_path, monkeypatch):
+    import blurface.project as proj
+    monkeypatch.setattr(proj, "BACKUP_KEEP", 3)
+    p = make(tmp_path)
+    p.save()
+    for _ in range(5):
+        Project.backup(p.video.path)
+    assert len(Project.backups(p.video.path)) == 3
