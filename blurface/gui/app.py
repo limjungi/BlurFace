@@ -26,7 +26,7 @@ from ..render import compose
 from ..video import probe
 from .source import FrameSource
 from .theme import apply_theme
-from .widgets import (ALL, PRESETS, arrow_icon, EffectPicker, PersonTimeline, Row, SeekBar, VideoView, preset_effect,
+from .widgets import (ALL, PRESETS, arrow_icon, tool_icon, EffectPicker, PersonTimeline, Row, SeekBar, VideoView, preset_effect,
                       preset_icon, preset_of)
 from .workers import AnalyzeWorker, ExportWorker
 
@@ -226,8 +226,13 @@ class MainWindow(QMainWindow):
             b.setFixedHeight(26)
             tl_bar.addWidget(b)
             return b
-        tool_btn(self.act_tool_select, "선택 도구 (A): 막대를 눌러 고르고, 끝을 끌어 길이 조절", 64)
-        tool_btn(self.act_tool_blade, "자르기 도구 (B): 막대를 클릭한 자리에서 자르기", 64)
+        self.act_tool_select.setIcon(tool_icon("select"))
+        self.act_tool_blade.setIcon(tool_icon("blade"))
+        for act_, tip in ((self.act_tool_select, "선택 도구 (A)\n막대를 눌러 고르고, 끝을 끌어 길이 조절"),
+                          (self.act_tool_blade, "자르기 도구 (B)\n막대를 클릭한 자리에서 자르기")):
+            b = tool_btn(act_, tip, 34)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            b.setIconSize(QSize(18, 18))
         tl_bar.addSpacing(10)
         hint = muted("자른 부분을 눌러 고른 뒤 효과를 바꾸거나 ⌫로 지우기")
         hint.setWordWrap(False)

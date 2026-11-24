@@ -101,6 +101,41 @@ def arrow_icon(redo: bool = False, size: int = 18) -> QIcon:
     return QIcon(pix)
 
 
+def tool_icon(kind: str, size: int = 18) -> QIcon:
+    """타임라인 도구 아이콘: select(화살표) / blade(면도날)."""
+    pix = QPixmap(size * 2, size * 2)
+    pix.setDevicePixelRatio(2)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    white = QColor("#f2f2f7")
+    if kind == "select":
+        path = QPainterPath()
+        pts = [(5, 2.5), (5, 15), (8, 12), (10.2, 16.5), (12, 15.6), (9.8, 11.2), (14, 11.2)]
+        path.moveTo(*pts[0])
+        for x, y in pts[1:]:
+            path.lineTo(x, y)
+        path.closeSubpath()
+        p.setPen(QPen(white, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(white)
+        p.drawPath(path)
+    else:
+        p.translate(size / 2, size / 2)
+        p.rotate(-40)
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(-4.5, -7.5, 9, 15), 1.5, 1.5)
+        slot = QPainterPath()
+        slot.addRoundedRect(QRectF(-1, -4.5, 2, 9), 1, 1)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(white)
+        p.drawPath(body.subtracted(slot))
+        p.setPen(QPen(QColor("#1e1e20"), 1))
+        p.drawLine(QPointF(-4.5, -2), QPointF(-2.5, -2))
+        p.drawLine(QPointF(2.5, 2), QPointF(4.5, 2))
+    p.end()
+    return QIcon(pix)
+
+
 @lru_cache(maxsize=64)
 def preset_icon(key: str, size: int = 40) -> QIcon:
     """효과 버튼용 작은 그림."""
