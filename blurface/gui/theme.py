@@ -39,6 +39,9 @@ QPushButton:hover {{ background: #48484a; }}
 QPushButton:pressed {{ background: #545458; }}
 QPushButton:disabled {{ background: #2c2c2e; color: #5a5a5e; }}
 QPushButton#danger {{ color: #ff453a; }}
+QPushButton#primary {{ background: {ACCENT}; color: white; font-weight: 600; }}
+QPushButton#primary:hover {{ background: #409cff; }}
+QDialog {{ background: #1e1e20; }}
 QLineEdit, QSpinBox, QComboBox {{ background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 6px;
                                   padding: 4px 8px; selection-background-color: {ACCENT}; }}
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border: 1px solid {ACCENT}; }}

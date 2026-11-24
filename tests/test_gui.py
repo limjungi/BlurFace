@@ -296,3 +296,16 @@ def test_fullscreen_hides_panels(app, opened):
     assert not w.timeline.isVisible() and not w.inspector.isVisible()
     w._escape()
     assert w.timeline.isVisible()
+
+
+def test_export_dialog_options(app, opened):
+    from blurface.gui.export_dialog import ExportDialog
+    dlg = ExportDialog(opened.project)
+    assert set(dlg.res_btns) == {"original", "720"}  # FHD 원본보다 작은 것만
+    dlg.codec_btns["h264"].setChecked(True)
+    dlg.quality_btns["small"].setChecked(True)
+    dlg.res_btns["720"].setChecked(True)
+    o = dlg.options()
+    assert (o.codec, o.quality, o.height) == ("h264", "small", 720)
+    assert "MB" in dlg.info.text() and "1280×720" in dlg.info.text()
+    assert dlg.out_path().endswith("_mosaic.mp4")

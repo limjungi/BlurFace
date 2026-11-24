@@ -18,6 +18,7 @@ uv run blurface run 영상.mp4                    # 영상_mosaic.mp4 생성
 uv run blurface persons 영상.mp4                # 인물 번호 확인 (영상.blurface/persons.jpg)
 uv run blurface render 영상.mp4 --person 1=sticker:smile --person 4=none
 uv run blurface render 영상.mp4 --person-at 1@12-20=sticker:heart   # 인물 1만 12~20초 하트
+uv run blurface render 영상.mp4 --codec h264 --quality small --resolution 720p   # 가볍게 내보내기
 ```
 화면 사용법 (파이널컷과 비슷한 배치)
 - 아래 타임라인에 인물마다 한 줄. 막대 색 = 그 사람에게 걸린 효과 (기본: 타원 블러). 맨 위 "모든 인물" 줄 = 기본 효과

@@ -55,13 +55,14 @@ class AnalyzeWorker(_Worker):
 class ExportWorker(_Worker):
     done = Signal(str, float)  # 출력 경로, 걸린 시간
 
-    def __init__(self, project: Project, out: str):
+    def __init__(self, project: Project, out: str, opts=None):
         super().__init__()
         self.project = copy.deepcopy(project)  # 내보내는 동안 화면에서 바꿔도 영향 없게
         self.out = out
+        self.opts = opts
 
     def work(self):
         from ..render import render
 
-        secs = render(self.project, self.out, progress=self.progress.emit, cancel=self._is_cancelled)
+        secs = render(self.project, self.out, progress=self.progress.emit, cancel=self._is_cancelled, opts=self.opts)
         self.done.emit(self.out, secs)

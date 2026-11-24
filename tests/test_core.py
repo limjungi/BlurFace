@@ -256,3 +256,15 @@ def test_animated_gif_frames_follow_video_time(tmp_path):
     img = np.zeros((200, 200, 3), np.uint8)
     apply(img, [50, 50, 150, 150], parse_effect(f"image:{gif}"), t=0.7)
     assert img[100, 100][0] > 200 and img[52, 52].sum() == 0  # 파랑, 모서리는 투명(원본)
+
+
+def test_export_options_size_and_bitrate():
+    from blurface.render import ExportOptions
+    v = VideoInfo("x.mp4", 3840, 2160, 30.0, "30/1", 10, 0, True, "hevc", 40_000_000, {}, True)
+    assert ExportOptions().size(3840, 2160) == (3840, 2160)
+    assert ExportOptions(height=1080).size(3840, 2160) == (1920, 1080)
+    assert ExportOptions(height=720).size(1080, 1920) == (720, 1280)  # 세로 영상은 짧은 변(가로) 기준
+    hi, small = ExportOptions().bitrate(v), ExportOptions(quality="small", height=1080).bitrate(v)
+    assert small < hi / 10  # 화질·해상도 모두 줄이면 훨씬 작게
+    assert ExportOptions(codec="h264").bitrate(v) > hi  # H.264는 같은 화질에 더 많이
+    assert ExportOptions(codec="h264").high_bit(v) is False and ExportOptions().high_bit(v) is True
