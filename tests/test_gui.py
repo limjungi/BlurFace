@@ -517,3 +517,45 @@ def test_audio_follows_play_seek_speed(app, opened, monkeypatch):
     names = [c[0] for c in calls]
     assert names == ["play", "seek", "set_rate", "pause"]
     assert calls[1][1] == pytest.approx(w._time(300))
+
+
+def test_add_many_images_at_once(app, tmp_path, monkeypatch):
+    import cv2
+    import numpy as np
+
+    from blurface import library
+    files = []
+    for i, name in enumerate(["a.png", "b.jpg", "c.webp", "notes.txt"]):
+        f = tmp_path / name
+        if name.endswith(".txt"):
+            f.write_text("x")
+        else:
+            cv2.imwrite(str(f), np.full((20, 20, 3), 40 * i, np.uint8))
+        files.append(str(f))
+    picker = EffectPicker()
+    monkeypatch.setattr("blurface.gui.widgets.QFileDialog.getOpenFileNames", lambda *a, **k: (files, ""))
+    assert picker._pick_image()
+    assert len(library.images()) == 3  # 이미지가 아닌 파일은 건너뜀
+    assert picker.effect()["type"] == "image" and Path(picker.effect()["value"]).stem.startswith("a")
+    assert picker.lib_grid.count() == 4  # 3개 + 올리기 버튼
+
+
+def test_drop_images_on_window_adds_to_library(app, opened, tmp_path):
+    import cv2
+    import numpy as np
+    from PySide6.QtCore import QMimeData, QPoint, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    from blurface import library
+    files = []
+    for i, name in enumerate(("x.png", "y.png")):  # 내용이 같으면 보관함이 하나로 합치므로 다르게
+        cv2.imwrite(str(tmp_path / name), np.full((20, 20, 3), 100 + 50 * i, np.uint8))
+        files.append(QUrl.fromLocalFile(str(tmp_path / name)))
+    w = opened
+    pid = w.timeline.rows[1].pid
+    w.select_person(pid)
+    mime = QMimeData()
+    mime.setUrls(files)
+    ev = QDropEvent(QPoint(10, 10), Qt.DropAction.CopyAction, mime, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    w.dropEvent(ev)
+    assert len(library.images()) == 2 and w.project.effect_for(pid)["type"] == "image"

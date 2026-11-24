@@ -1232,6 +1232,7 @@ class EffectPicker(QWidget):
         self._key = "blur"
         self.image_path = ""
         self.color = "#000000"
+        self.setAcceptDrops(True)
         self._debounce = QTimer(self, singleShot=True, interval=120)  # 슬라이더를 끄는 동안 너무 자주 저장하지 않게
         self._debounce.timeout.connect(self.changed)
 
@@ -1366,7 +1367,7 @@ class EffectPicker(QWidget):
         add.setObjectName("thumb")
         add.setText("＋")
         add.setFixedSize(52, 52)
-        add.setToolTip("이미지 올리기 (보관함에 저장되어 다음에도 바로 쓸 수 있어요)")
+        add.setToolTip("이미지 올리기 (여러 개 선택 가능, 파일을 여기로 끌어다 놓아도 돼요)\n보관함에 저장되어 다음에도 바로 쓸 수 있어요")
         add.clicked.connect(self._pick_image)
         n = len(items)
         self.lib_grid.addWidget(add, n // 5, n % 5)
@@ -1387,12 +1388,33 @@ class EffectPicker(QWidget):
         self._fill_library()
 
     def _pick_image(self) -> bool:
+        paths, _ = QFileDialog.getOpenFileNames(self, "이미지 올리기 (여러 개 선택 가능)", "",
+                                                "이미지 (*.png *.jpg *.jpeg *.webp *.gif)")
+        return self.add_images(paths)
+
+    def add_images(self, paths: list[str]) -> bool:
+        """여러 이미지를 한 번에 보관함에 넣고, 첫 번째 것을 이 효과로 쓴다."""
         from .. import library
-        path, _ = QFileDialog.getOpenFileName(self, "스티커 이미지 올리기", "", "이미지 (*.png *.jpg *.jpeg *.webp *.gif)")
-        if not path:
+        added = []
+        for path in paths:
+            if Path(path).suffix.lower() in library.EXTS:
+                try:
+                    added.append(library.add(path))
+                except OSError:
+                    pass
+        if not added:
             return False
-        self._use_image(str(library.add(path)))
+        self._use_image(str(added[0]))
         return True
+
+    def dragEnterEvent(self, e):
+        if self._key == "image" and e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        """이미지 파일들을 보관함 영역에 끌어다 놓아 한 번에 추가."""
+        if self.add_images([u.toLocalFile() for u in e.mimeData().urls()]):
+            e.acceptProposedAction()
 
     def _on_click(self, key: str):
         if key == "image" and not self.image_path:
