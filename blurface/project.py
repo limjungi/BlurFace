@@ -23,7 +23,8 @@ from .effects import SHAPES
 from .video import VideoInfo
 
 BACKUP_KEEP = 10  # 백업을 최근 몇 개까지 남길지
-BRIDGE_SEC = 1.0  # 같은 사람을 이만큼 이하로 놓치면 앞뒤 상자를 이어서 가림
+BRIDGE_SEC = 1.0
+STEADY_SEC = 0.5  # 효과 크기: 앞뒤 이만큼(초) 중 가장 큰 상자 크기를 씀 (고개를 돌려도 효과가 작아지지 않게)  # 같은 사람을 이만큼 이하로 놓치면 앞뒤 상자를 이어서 가림
 VERSION = 4  # 4: 인물 번호 1부터·자르기(splits) / 2: 프레임 시각(pts), 구간 효과 / 3: 수동 수정(키프레임·지운 구간·트랙 나누기)
 
 EFFECT_TYPES = ("mosaic", "blur", "solid", "sticker", "image", "none")
@@ -127,6 +128,7 @@ class Project:
     def __post_init__(self):
         self._cache: dict[int, dict] = {}
         self._per: dict | None = None
+        self._steady: dict = {}
         self._bridged: dict[int, set[int]] = {}
 
     @staticmethod
@@ -315,7 +317,54 @@ class Project:
                     per.setdefault(f, []).append((tid, box, "interp"))
                     self._bridged.setdefault(pid, set()).add(f)
             self._per = per
+            self._steady = self._steady_sizes(per)
         return self._per
+
+    def cover_size(self, frame: int, tid: int, box) -> list[float]:
+        """효과를 입힐 상자: 위치(중심)는 얼굴을 따라가고, 크기는 앞뒤 STEADY_SEC 중 가장 큰 크기."""
+        self.boxes_by_frame()
+        wh = self._steady.get((frame, tid))
+        if wh is None:
+            return list(box[:4])
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        return [cx - wh[0] / 2, cy - wh[1] / 2, cx + wh[0] / 2, cy + wh[1] / 2]
+
+    def _steady_sizes(self, per: dict) -> dict[tuple[int, int], tuple[float, float]]:
+        """인물마다 연속해서 나오는 구간(장면 전환에서 끊음) 안에서 상자 폭·높이의 앞뒤 최댓값.
+
+        사람이 직접 그린 상자(manual)는 그 크기 그대로 둔다.
+        """
+        from numpy.lib.stride_tricks import sliding_window_view
+        half = max(1, round(self.video.fps * STEADY_SEC))
+        cuts = sorted(self.cuts)
+        by_person: dict[int, dict[int, tuple[int, list[float], str]]] = {}
+        for f, items in per.items():
+            for tid, b, src in items:
+                pid = self.tracks[tid].person
+                cur = by_person.setdefault(pid, {}).get(f)
+                # 같은 프레임에 같은 사람이 둘이면 (드묾) 큰 쪽 기준
+                if cur is None or (b[2] - b[0]) > (cur[1][2] - cur[1][0]):
+                    by_person[pid][f] = (tid, b, src)
+        out = {}
+        for rows in by_person.values():
+            frames = sorted(rows)
+            runs, run = [], [frames[0]]
+            for a, b in zip(frames, frames[1:]):
+                if b == a + 1 and bisect.bisect_right(cuts, a) == bisect.bisect_right(cuts, b):
+                    run.append(b)
+                else:
+                    runs.append(run)
+                    run = [b]
+            runs.append(run)
+            for run in runs:
+                wh = np.array([[rows[f][1][2] - rows[f][1][0], rows[f][1][3] - rows[f][1][1]] for f in run], float)
+                pad = np.pad(wh, ((half, half), (0, 0)), constant_values=0)
+                big = sliding_window_view(pad, 2 * half + 1, axis=0).max(axis=2)
+                for f, (w, h) in zip(run, big):
+                    tid, _b, src = rows[f]
+                    if src != "manual":
+                        out[(f, tid)] = (float(w), float(h))
+        return out
 
     def _bridges(self, pid: int) -> list[tuple[int, int, list[float]]]:
         """같은 사람이 잠깐(최대 BRIDGE_SEC) 놓쳤다 다시 잡힌 틈을 상자 보간으로 메운다.
