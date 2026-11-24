@@ -22,7 +22,7 @@ EFFECT_COLORS = {"blur": "#0a84ff", "mosaic": "#bf5af2", "solid": "#8e8e93", "st
                  "image": "#30d158", "none": "#ff453a"}
 # 효과 버튼 (키, 이름). 스티커는 모양별로 따로 버튼
 PRESETS = [("blur", "블러"), ("mosaic", "모자이크"), ("solid", "단색"), ("none", "안 가림"),
-           ("smile", "스마일"), ("heart", "하트"), ("image", "내 이미지"), ("inherit", "기본 따름")]
+           ("smile", "스마일"), ("heart", "하트"), ("image", "내 이미지"), ("inherit", "모두와 같게")]
 PRESET_NAMES = dict(PRESETS)
 SHAPE_CHOICES = [("사각형", "rect"), ("둥근 사각형", "rounded"), ("타원", "ellipse")]
 SHAPED = ("mosaic", "blur", "solid")  # 모양·가장자리를 고를 수 있는 효과
@@ -416,6 +416,7 @@ class PersonTimeline(QWidget):
     context_menu = Signal(int, QPoint)  # 이름 칸 우클릭
     piece_menu = Signal(int, int, QPoint)  # 막대 칸 우클릭: 인물, 프레임
     split_moved = Signal(int, int, int)  # 인물, 원래 위치, 새 위치
+    blade_at = Signal(int, int)  # 자르기 도구로 클릭: 인물, 프레임
     trimmed = Signal(int, int, int)  # 인물, 막대 끝 원래 위치, 새 위치
     renamed = Signal(int, str)
 
@@ -437,6 +438,8 @@ class PersonTimeline(QWidget):
         self.zoom = 1.0  # 1 = 영상 전체가 한 화면
         self.offset = 0.0  # 화면 왼쪽 끝 프레임
         self._drag: dict | None = None
+        self.tool = "select"  # select | blade (파이널컷 A / B)
+        self._hover: tuple[int, int] | None = None  # 자르기 도구에서 마우스가 가리키는 (줄, 프레임)
         self.scroll = QScrollBar(Qt.Orientation.Vertical, self)
         self.scroll.valueChanged.connect(self.update)
         self.hscroll = QScrollBar(Qt.Orientation.Horizontal, self)
@@ -462,6 +465,11 @@ class PersonTimeline(QWidget):
 
     def set_selection(self, current: int | None, picked: set[int], piece=None):
         self.current, self.picked, self.piece = current, set(picked), piece
+        self.update()
+
+    def set_tool(self, tool: str):
+        self.tool = tool
+        self._hover = None
         self.update()
 
     def set_pos(self, f: int):
@@ -625,11 +633,12 @@ class PersonTimeline(QWidget):
                 x = self._x(c)
                 p.drawLine(QPointF(x, self.RULER), QPointF(x, h))
         d = self._drag
-        if d and d["mode"] in ("split", "trim") and "new" in d:
-            t = self._top(d["row"])
-            x = self._x(d["new"])
-            p.setPen(QPen(QColor("#ffd60a"), 2))
-            p.drawLine(QPointF(x, t + 2), QPointF(x, t + self.ROW - 2))
+        if self.tool == "blade" and self._hover and not d:  # 자르기 도구: 자를 자리 미리 보기
+            i, f = self._hover
+            t = self._top(i)
+            x = self._x(f)
+            p.setPen(QPen(QColor("#ff453a"), 1.5))
+            p.drawLine(QPointF(x, t + 1), QPointF(x, t + self.ROW - 1))
         p.restore()
         self._paint_ruler(p)
         if self.n and x0 - 1 <= self._x(self.pos) <= x1 + 1:
@@ -718,6 +727,7 @@ class PersonTimeline(QWidget):
                        "효과를 따로 정하지 않은 모든 인물에 적용되는 기본 효과")
             return
         y, hh = t + 8, self.ROW - 16
+        r = self._preview(r)
         bounds = [0, *r.splits, self.n]
         for a, b in r.presence:  # 막대를 자른 곳에서 나눠, 조각마다 그 조각의 효과 색으로
             cuts = [a, *[s for s in bounds if a < s < b], b]
@@ -741,6 +751,32 @@ class PersonTimeline(QWidget):
             x = self._x(f)
             p.drawPolygon([QPointF(x, t + self.ROW - 10), QPointF(x - 4.5, t + self.ROW - 2),
                            QPointF(x + 4.5, t + self.ROW - 2)])
+
+    def _preview(self, r: Row) -> Row:
+        """길이 조절 중이면 끄는 대로 막대 모양을 바꿔 보여준다."""
+        d = self._drag
+        if not d or "new" not in d or self.rows[d["row"]].pid != r.pid:
+            return r
+        old, new = d["orig"], d["new"]
+        if d["mode"] == "split":
+            sp = sorted(r.splits)
+            i = sp.index(old) if old in sp else -1
+            if i < 0:
+                return r
+            lo = (sp[i - 1] if i else 0) + 1
+            hi = (sp[i + 1] if i + 1 < len(sp) else self.n) - 1
+            new = max(lo, min(hi, new))
+            segs = [{**s, "start": new if s["start"] == old else s["start"], "end": new if s["end"] == old else s["end"]}
+                    for s in r.segments]
+            return Row(**{**r.__dict__, "splits": [new if x == old else x for x in r.splits], "segments": segs})
+        presence = []
+        for a, b in r.presence:
+            if a == old:
+                a = min(new, b - 1)
+            elif b == old:
+                b = max(new, a + 1)
+            presence.append((a, b))
+        return Row(**{**r.__dict__, "presence": presence})
 
     def _paint_ruler(self, p: QPainter):
         w = self.width()
@@ -811,6 +847,10 @@ class PersonTimeline(QWidget):
             if chip.contains(pos):
                 self.effect_menu.emit(r.pid, self.mapToGlobal(chip.bottomLeft().toPoint()))
             return
+        if self.tool == "blade" and r.pid != ALL:
+            self.person_clicked.emit(r.pid, False)
+            self.blade_at.emit(r.pid, self._frame_at(pos.x()))
+            return
         handle = self._handle_at(i, pos.x())
         if handle:
             self._drag = {**handle, "row": i}
@@ -855,6 +895,14 @@ class PersonTimeline(QWidget):
     def mouseMoveEvent(self, e):
         pos = e.position()
         d = self._drag
+        if not d and self.tool == "blade":
+            i = self._row_at(pos.y())
+            ok = i is not None and pos.x() > self.LABEL and self.rows[i].pid != ALL
+            self._hover = (i, self._frame_at(pos.x())) if ok else None
+            self.setCursor(Qt.CursorShape.CrossCursor if ok else Qt.CursorShape.ArrowCursor)
+            self.setToolTip("클릭한 자리에서 자르기" if ok else "")
+            self.update()
+            return
         if not d:
             i = self._row_at(pos.y())
             handle = self._handle_at(i, pos.x()) if i is not None and pos.x() > self.LABEL else None
@@ -863,7 +911,7 @@ class PersonTimeline(QWidget):
             if i is not None and self._chip(i).contains(pos):
                 tip = "클릭해서 효과 바꾸기"
             elif handle:
-                tip = "좌우로 끌어 길이 조절"
+                tip = "좌우로 끌어서 길이 조절"
             elif i is not None and pos.x() < self.LABEL and self.rows[i].pid != ALL:
                 tip = "더블클릭해서 이름 바꾸기"
             self.setToolTip(tip)
@@ -885,6 +933,68 @@ class PersonTimeline(QWidget):
             self.split_moved.emit(pid, d["orig"], d["new"])
         elif d["mode"] == "trim":
             self.trimmed.emit(pid, d["orig"], d["new"])
+        self.update()
+
+
+class SeekBar(QWidget):
+    """재생 진행 바: 클릭·끌기로 바로 이동, 마우스를 올리면 두꺼워지고 그 위치 시각을 보여줌."""
+
+    seek = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.n = 1
+        self.pos = 0
+        self.time_text = lambda f: str(f)
+        self._hover_x: float | None = None
+        self.setFixedHeight(22)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_range(self, n: int):
+        self.n = max(1, n)
+        self.update()
+
+    def set_pos(self, f: int):
+        if f != self.pos:
+            self.pos = f
+            self.update()
+
+    def _frame_at(self, x: float) -> int:
+        return max(0, min(self.n - 1, int(round((x - 8) / max(1, self.width() - 16) * (self.n - 1)))))
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        hover = self._hover_x is not None
+        h = 6 if hover else 4
+        track = QRectF(8, (self.height() - h) / 2, self.width() - 16, h)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 60))
+        p.drawRoundedRect(track, h / 2, h / 2)
+        x = 8 + (self.width() - 16) * self.pos / max(1, self.n - 1)
+        p.setBrush(QColor("#0a84ff"))
+        p.drawRoundedRect(QRectF(track.x(), track.y(), max(h, x - 8), h), h / 2, h / 2)
+        if hover:
+            p.setBrush(QColor(255, 255, 255, 90))
+            p.drawEllipse(QPointF(self._hover_x, self.height() / 2), 3, 3)
+            p.setBrush(QColor("#ffffff"))
+            p.drawEllipse(QPointF(x, self.height() / 2), 7, 7)
+
+    def mouseMoveEvent(self, e):
+        self._hover_x = e.position().x()
+        f = self._frame_at(self._hover_x)
+        from PySide6.QtWidgets import QToolTip
+        QToolTip.showText(e.globalPosition().toPoint() + QPoint(0, -36), self.time_text(f), self)
+        if e.buttons() & Qt.MouseButton.LeftButton:
+            self.seek.emit(f)
+        self.update()
+
+    def mousePressEvent(self, e):
+        self.seek.emit(self._frame_at(e.position().x()))
+
+    def leaveEvent(self, _):
+        self._hover_x = None
         self.update()
 
 
@@ -1042,7 +1152,7 @@ class EffectPicker(QWidget):
     def key(self) -> str:
         return self._key
 
-    def set_inherit_allowed(self, on: bool, label_: str = "기본 따름"):
+    def set_inherit_allowed(self, on: bool, label_: str = "모두와 같게"):
         self.allow_inherit = on
         self.btns["inherit"].setVisible(on)
         self.btns["inherit"].setText(label_)
