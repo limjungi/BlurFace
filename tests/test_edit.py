@@ -106,7 +106,7 @@ def test_review_points_find_interp_and_low_score(tmp_path):
     for f in range(30, 36):
         a.boxes[f][4] = 0.4
     p._touch(0)
-    reasons = dict(p.review_points())
+    reasons = {f: why for f, _pid, why in p.review_points()}
     assert 10 in reasons and "끊겨" in reasons[10]
     assert 30 in reasons and "점수" in reasons[30]
 
