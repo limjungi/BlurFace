@@ -59,7 +59,7 @@ def compose(img: np.ndarray, frame: int, p: Project, per: dict, scale: float = 1
     for tid, b, src in per.get(frame, []):
         pid = p.tracks[tid].person
         effect = p.effect_for(pid, frame)
-        area = cover_box([x * scale for x in b[:4]], effect)
+        area = cover_box([x * scale for x in p.cover_size(frame, tid, b)], effect)
         apply(img, area, effect, p.time_of(frame))
         if debug:
             box = clip_box(area, w, h)

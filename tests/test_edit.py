@@ -250,3 +250,41 @@ def test_long_gap_cut_removed_or_far_not_bridged(tmp_path):
     p.remove_range(1, 48, 50)
     assert not set(range(30, 50)) & set(p.person_frames(0))
     assert len(_two_pieces(tmp_path, x2=400).person_frames(0)) < 100  # 다른 자리 (같은 사람이 아닐 수 있음)
+
+
+def _shrinking(tmp_path, cuts=()):
+    """얼굴 상자 폭이 20인데 프레임 30~32에서만 10으로 작아짐 (고개를 돌린 것처럼). 10fps → 앞뒤 5프레임."""
+    p = make(tmp_path)
+    a = p.auto[0]
+    for f in (30, 31, 32):
+        x = a.boxes[f][0]
+        a.boxes[f] = [x + 5, 0, x + 15, 10, 0.9]
+    for f in range(50):
+        if f not in (30, 31, 32):
+            x = a.boxes[f][0]
+            a.boxes[f] = [x, -5, x + 20, 15, 0.9]
+    p.cuts = list(cuts)
+    p._cache.clear()
+    p._per = None
+    return p
+
+
+def test_effect_size_keeps_largest_nearby(tmp_path):
+    p = _shrinking(tmp_path)
+    b = p.track_boxes(0)[31][0]
+    c = p.cover_size(31, 0, b)
+    assert c[2] - c[0] == 20 and c[3] - c[1] == 20  # 작아지지 않음
+    assert (c[0] + c[2]) / 2 == (b[0] + b[2]) / 2  # 위치는 얼굴을 따라감
+    assert p.cover_size(10, 0, p.track_boxes(0)[10][0]) == p.track_boxes(0)[10][0][:4]  # 흔들림 없는 곳은 그대로
+
+
+def test_effect_size_does_not_cross_cut_or_override_manual(tmp_path):
+    p = _shrinking(tmp_path, cuts=[30])  # 30에서 장면 전환: 앞 장면의 큰 상자를 가져오지 않음
+    c = p.cover_size(30, 0, p.track_boxes(0)[30][0])
+    assert c[2] - c[0] == 20  # 33~35(같은 장면 뒤쪽)는 큼 → 그 크기
+    p = _shrinking(tmp_path, cuts=[30, 33])
+    c = p.cover_size(31, 0, p.track_boxes(0)[31][0])
+    assert c[2] - c[0] == 10  # 30~32만 있는 장면: 그대로
+    p = _shrinking(tmp_path)
+    p.set_key(0, 31, [70, 0, 80, 10])  # 사람이 그린 상자는 그 크기 그대로
+    assert p.cover_size(31, 0, p.track_boxes(0)[31][0]) == [70, 0, 80, 10]
