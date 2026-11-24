@@ -108,7 +108,8 @@ def dir_for(video: str | Path) -> Path:
     if d is not None and d.exists():
         return d
     base = root()
-    d = next((d for d in _dirs(base) if read_meta(d).get("video") and _key(read_meta(d)["video"]) == k), None)
+    candidates = _dirs(base) + [Path(x) for x in _config().get("extra", []) if is_project(x)]
+    d = next((d for d in candidates if read_meta(d).get("video") and _key(read_meta(d)["video"]) == k), None)
     if d is None:
         v = Path(video)
         legacy = v.with_name(v.stem + SUFFIX)
@@ -123,10 +124,36 @@ def dir_for(video: str | Path) -> Path:
     return d
 
 
+def is_project(path: str | Path) -> bool:
+    d = Path(path)
+    return d.name.endswith(SUFFIX) and (d / "project.json").exists()
+
+
+def use_dir(d: str | Path) -> str:
+    """.blurface 프로젝트를 직접 골라 열 때: 그 폴더를 쓰도록 기억하고 원본 영상 경로를 돌려준다.
+
+    보관함 밖에 있는 프로젝트(다른 곳에 복사해 둔 것 등)도 목록에 보이게 설정에 적어 둔다.
+    """
+    d = Path(d).expanduser().resolve()
+    video = read_meta(d).get("video", "")
+    if video:
+        _found[_key(video)] = d
+    if d.parent != root().resolve():
+        cfg = _config()
+        extra = [x for x in cfg.get("extra", []) if x != str(d)] + [str(d)]
+        cfg["extra"] = extra[-50:]
+        app_home().mkdir(parents=True, exist_ok=True)
+        (app_home() / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=1))
+    return video
+
+
 def list_projects() -> list[dict]:
-    """보관함의 프로젝트 목록 (최근 수정 순). 각 항목에 dir, video_exists 추가."""
+    """보관함(과 직접 열었던 보관함 밖) 프로젝트 목록 (최근 수정 순). 각 항목에 dir, video_exists 추가."""
     out = []
-    for d in _dirs(root()):
+    dirs = _dirs(root())
+    seen = {d.resolve() for d in dirs}
+    dirs += [Path(x) for x in _config().get("extra", []) if is_project(x) and Path(x).resolve() not in seen]
+    for d in dirs:
         meta = read_meta(d)
         out.append({**meta, "dir": d, "video_exists": bool(meta.get("video")) and Path(meta["video"]).exists()})
     return sorted(out, key=lambda m: m.get("updated", 0), reverse=True)
@@ -154,6 +181,10 @@ def trash(d: Path) -> Path:
     shutil.move(str(d), str(target))
     for k in [k for k, v in _found.items() if v == d]:
         del _found[k]
+    cfg = _config()
+    if str(d) in cfg.get("extra", []):
+        cfg["extra"].remove(str(d))
+        (app_home() / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=1))
     return target
 
 

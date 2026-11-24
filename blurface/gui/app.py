@@ -16,7 +16,7 @@ from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
-                               QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+                               QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter,
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import projects
@@ -28,7 +28,8 @@ from ..video import probe
 from .source import FrameSource
 from .theme import apply_theme
 from .widgets import (ALL, PRESETS, EffectPicker, PersonTimeline, Row, SeekBar, VideoView, arrow_icon, effect_short,
-                      preset_effect, preset_icon, preset_of, tool_icon)
+                      preset_effect, preset_icon, preset_of, sidebar_icon, tool_icon)
+from .audio import AudioPlayer
 from .sidebar import ProjectSidebar
 from .workers import AnalyzeWorker, ExportWorker
 
@@ -98,6 +99,7 @@ class MainWindow(QMainWindow):
         tb.setIconSize(QSize(18, 18))
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(tb)
+        self.toolbar = tb
         self.act_open = QAction("열기", self, shortcut=QKeySequence.StandardKey.Open, triggered=self.open_dialog)
         self.act_export = QAction("내보내기", self, shortcut="Ctrl+E", triggered=self.export)
         self.act_undo = QAction(arrow_icon(), "실행 취소", self, shortcut=QKeySequence.StandardKey.Undo, triggered=self.undo)
@@ -162,6 +164,26 @@ class MainWindow(QMainWindow):
         controls.addSpacing(14)
         controls.addWidget(self.total_label)
         controls.addStretch()
+        # 소리: 음소거 버튼 + 음량
+        st = QSettings("BlurFace", "BlurFace")
+        self.audio = AudioPlayer(self)
+        self.mute_btn = QToolButton()
+        self.mute_btn.setObjectName("play")
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.setFixedSize(30, 30)
+        self.mute_btn.setToolTip("소리 끄기/켜기 (M)")
+        self.mute_btn.toggled.connect(self.set_muted)
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 100)
+        self.volume.setFixedWidth(80)
+        self.volume.setToolTip("음량")
+        self.volume.valueChanged.connect(self._on_volume)
+        self.volume.setValue(int(st.value("volume", 80)))
+        self.mute_btn.setChecked(st.value("muted", False, type=bool))
+        self.set_muted(self.mute_btn.isChecked())
+        controls.addWidget(self.mute_btn)
+        controls.addWidget(self.volume)
+        controls.addSpacing(14)
         self.speed_btns = {}
         for sp in (0.5, 1.0, 2.0):
             b = QToolButton()
@@ -300,9 +322,9 @@ class MainWindow(QMainWindow):
         v.addWidget(self.insp_sub)
         v.addWidget(self.name_edit)
 
-        v.addWidget(section("효과"))
         self.picker = EffectPicker(allow_inherit=True)
         self.picker.changed.connect(self._on_picker)
+        v.addWidget(self.picker.heading)
         v.addWidget(self.picker)
 
         # 조각(자른 구간)
@@ -399,6 +421,7 @@ class MainWindow(QMainWindow):
 
     def _build_shortcuts(self):
         for key, fn in [("I", self.mark_in), ("O", self.mark_out),
+                        ("M", lambda: self.set_muted(not self.mute_btn.isChecked())),
                         ("S", lambda: self._track_edit("split")), ("Escape", self._escape)]:
             QShortcut(QKeySequence(key), self, activated=fn)
 
@@ -436,7 +459,9 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("파일")
         m.addAction(self.act_about)
         self.act_root = QAction("프로젝트 저장 위치…", self, triggered=self.choose_root)
-        for a in (self.act_open, self.act_export, None, self.act_reanalyze, self.act_restore, None, self.act_root,
+        self.act_open_project = QAction("프로젝트 폴더 열기…", self, shortcut="Ctrl+Shift+O",
+                                        triggered=self.open_project_dialog)
+        for a in (self.act_open, self.act_open_project, self.act_export, None, self.act_reanalyze, self.act_restore, None, self.act_root,
                   self.act_notify):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("편집")
@@ -457,8 +482,12 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("보기")
         self.act_zoom_in.setText("타임라인 확대")
         self.act_zoom_out.setText("타임라인 축소")
-        self.act_sidebar = QAction("사이드바 보기", self, checkable=True, shortcut="Ctrl+Alt+S",
+        self.act_sidebar = QAction(sidebar_icon(), "사이드바 보기", self, checkable=True, shortcut="Ctrl+Alt+S",
                                    checked=self.sidebar.isVisible(), toggled=self.toggle_sidebar)
+        self.act_sidebar.setToolTip("프로젝트 사이드바 열기/닫기 (⌥⌘S)")
+        self.toolbar.insertAction(self.act_open, self.act_sidebar)
+        self.toolbar.insertSeparator(self.act_open)
+        self.toolbar.widgetForAction(self.act_sidebar).setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         for a in (self.act_sidebar, None, self.act_zoom_in, self.act_zoom_out, self.act_zoom_fit, None, self.act_full):
             m.addSeparator() if a is None else m.addAction(a)
         self.act_zoom_in.setIconText("+")
@@ -490,9 +519,32 @@ class MainWindow(QMainWindow):
 
     # ---------- 열기 / 분석 ----------
     def open_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "영상 열기", "", VIDEO_EXT)
+        path, _ = QFileDialog.getOpenFileName(self, "영상 또는 프로젝트 열기", "",
+                                              f"영상·프로젝트 ({VIDEO_EXT.split('(')[1].rstrip(')')} *.blurface);;"
+                                              f"{VIDEO_EXT};;BlurFace 프로젝트 (*.blurface)")
         if path:
-            self.open_video(path)
+            self.open_path(path)
+
+    def open_project_dialog(self):
+        """프로젝트(.blurface) 폴더를 골라 열기 (앱이 설치되기 전이라 폴더로 보일 때를 위해)."""
+        start = projects.root() if projects.root().exists() else Path.home()
+        path = QFileDialog.getExistingDirectory(self, "프로젝트(.blurface) 열기", str(start))
+        if path:
+            self.open_path(path)
+
+    def open_path(self, path: str):
+        """영상 파일이든 .blurface 프로젝트든 열기."""
+        p = Path(path.rstrip("/"))
+        if p.suffix == ".blurface" or (p / "project.json").exists():
+            if not projects.is_project(p):
+                QMessageBox.warning(self, "열기 실패", f"BlurFace 프로젝트가 아니에요.\n{p}")
+                return
+            meta = {**projects.read_meta(p), "dir": p.resolve()}
+            meta["video_exists"] = bool(meta.get("video")) and Path(meta["video"]).exists()
+            projects.use_dir(p)
+            self.open_project(meta)
+        else:
+            self.open_video(str(p))
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -501,7 +553,7 @@ class MainWindow(QMainWindow):
     def dropEvent(self, e):
         urls = e.mimeData().urls()
         if urls:
-            self.open_video(urls[0].toLocalFile())
+            self.open_path(urls[0].toLocalFile())
 
     def open_video(self, path: str):
         if self.worker:
@@ -516,6 +568,7 @@ class MainWindow(QMainWindow):
         if self.source:
             self.source.close()
         self.source = FrameSource(info)
+        self.audio.load(path, info.has_audio)
         self.project = None
         self.selected = None
         self.picked = set()
@@ -602,6 +655,7 @@ class MainWindow(QMainWindow):
         if not meta["video_exists"]:
             if not self._relink(meta):
                 return
+        projects.use_dir(meta["dir"])
         self.open_video(projects.read_meta(meta["dir"])["video"])
 
     def _relink(self, meta: dict) -> bool:
@@ -1310,6 +1364,9 @@ class MainWindow(QMainWindow):
 
     def seek(self, f: int):
         self.frame = max(0, min(self.n_frames - 1, f))
+        if self.play_timer.isActive():  # 재생 중에 옮기면 그 자리부터 이어서 재생
+            self._play_start = (time.perf_counter(), self.frame)
+            self.audio.seek(self._time(self.frame))
         self.refresh_frame()
 
     def step(self, d: int):
@@ -1344,6 +1401,7 @@ class MainWindow(QMainWindow):
                 self.frame = 0
             self._play_start = (time.perf_counter(), self.frame)
             self.play_timer.start()
+            self.audio.play(self._time(self.frame), self.speed)
             self.play_btn.setText("❚❚")
 
     def set_speed(self, speed: float):
@@ -1354,9 +1412,23 @@ class MainWindow(QMainWindow):
             a.setChecked(v == speed)
         if self.play_timer.isActive():
             self._play_start = (time.perf_counter(), self.frame)
+        self.audio.set_rate(speed)
 
     def pause(self):
         self.play_timer.stop()
+        self.audio.pause()
+
+    def set_muted(self, on: bool):
+        self.audio.set_muted(on)
+        self.mute_btn.setChecked(on)
+        self.mute_btn.setText("🔇" if on else "🔊")
+        QSettings("BlurFace", "BlurFace").setValue("muted", on)
+
+    def _on_volume(self, v: int):
+        self.audio.set_volume(v / 100)
+        QSettings("BlurFace", "BlurFace").setValue("volume", v)
+        if v and self.mute_btn.isChecked():
+            self.set_muted(False)
         self.play_btn.setText("▶")
 
     def _tick(self):
@@ -1368,6 +1440,7 @@ class MainWindow(QMainWindow):
         if target != self.frame:
             self.frame = target
             self.refresh_frame()
+        self.audio.sync(self._time(self.frame))
 
     def _toggle_boxes(self, on: bool):
         self.view.edit = on
@@ -1444,6 +1517,7 @@ class MainWindow(QMainWindow):
             subprocess.run(["open", "-R", out], check=False)
 
     def closeEvent(self, e):
+        self.audio.stop()
         for t in list(self._threads):
             t.cancel()
             t.wait(10000)
@@ -1464,7 +1538,7 @@ class BlurFaceApp(QApplication):
         if e.type() == QEvent.Type.FileOpen:
             path = e.file()
             if self.window:
-                self.window.open_video(path)
+                self.window.open_path(path)
             else:
                 self.pending = path
             return True
@@ -1480,10 +1554,10 @@ def main(argv: list[str] | None = None):
     app.window = win
     win.show()
     if app.pending:
-        QTimer.singleShot(0, lambda: win.open_video(app.pending))
+        QTimer.singleShot(0, lambda: win.open_path(app.pending))
     files = [a for a in argv[1:] if Path(a).exists()]
     if files:
-        QTimer.singleShot(0, lambda: win.open_video(files[0]))
+        QTimer.singleShot(0, lambda: win.open_path(files[0]))
     return app.exec()
 
 
